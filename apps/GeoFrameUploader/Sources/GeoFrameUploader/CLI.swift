@@ -64,6 +64,8 @@ struct CLI {
         do {
             let data = try JSONSerialization.data(withJSONObject: r, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
             try data.write(to: URL(fileURLWithPath: outPath), options: .atomic)
+            // GPS 位置情報を含むため所有者のみ読み書き可にする
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: outPath)
             CLI.log("wrote \(outPath)")
         } catch {
             CLI.log("failed to write report: \(error)")

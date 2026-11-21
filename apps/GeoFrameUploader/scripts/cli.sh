@@ -10,6 +10,10 @@ if [[ $# -lt 1 ]]; then
   exit 2
 fi
 SUB=$1; shift
+case "$SUB" in
+  status|scan|auth|upload|signout) ;;
+  *) echo "usage: $0 <status|scan|auth|upload|signout> [args...]" >&2; exit 2 ;;
+esac
 # open で起動したアプリの cwd は / になるため、ファイルパス引数は呼び出し元基準の絶対パスにする
 ARGS=()
 while [[ $# -gt 0 ]]; do

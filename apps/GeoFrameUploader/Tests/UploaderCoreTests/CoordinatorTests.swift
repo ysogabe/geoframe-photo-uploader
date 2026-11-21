@@ -81,7 +81,7 @@ final class FakeDrive: @unchecked Sendable {
             let meta = try! JSONSerialization.jsonObject(with: r.body) as! [String: Any]
             pendingName = meta["name"] as! String
             pendingMime = meta["mimeType"] as! String
-            return .http(200, ["Location": "https://upload.example/s"], Data())
+            return .http(200, ["Location": "https://www.googleapis.com/upload/s"], Data())
         }
         // 単一チャンクで完了
         uploads += 1

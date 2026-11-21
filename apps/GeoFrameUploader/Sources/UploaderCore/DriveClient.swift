@@ -22,6 +22,7 @@ public enum DriveError: Error, LocalizedError, Equatable {
     case unauthorized
     case invalidResponse(String)
     case missingSessionURI
+    case untrustedSessionURI
     case sessionRestartLimit
     case retriesExhausted(String)
     case md5Mismatch(fileId: String, expected: String, actual: String?)
@@ -35,6 +36,7 @@ public enum DriveError: Error, LocalizedError, Equatable {
         case .unauthorized: return "Drive API の認証に失敗しました（再サインインが必要かもしれません）"
         case .invalidResponse(let m): return "Drive API の応答が不正です: \(m)"
         case .missingSessionURI: return "再開可能アップロードのセッション URI が返りませんでした"
+        case .untrustedSessionURI: return "セッション URI が信頼できないホストを指しています（https://www.googleapis.com 以外は拒否します）"
         case .sessionRestartLimit: return "アップロードセッションの再作成回数の上限に達しました"
         case .retriesExhausted(let m): return "再試行の上限に達しました: \(m)"
         case .md5Mismatch(let id, let e, let a): return "アップロードは作成されましたが md5 が一致しません（fileId=\(id), 期待 \(e), Drive \(a ?? "なし")）"
@@ -210,6 +212,7 @@ public final class DriveClient: @unchecked Sendable {
         let (data, http) = try await sendWithRetry(req)
         guard http.statusCode == 200 else { throw Self.httpError(http.statusCode, data) }
         guard let loc = http.header("Location"), let url = URL(string: loc) else { throw DriveError.missingSessionURI }
+        guard url.scheme == "https", url.host?.lowercased() == "www.googleapis.com" else { throw DriveError.untrustedSessionURI }
         return url
     }
 

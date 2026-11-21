@@ -99,7 +99,7 @@ final class FakeResumableServer: @unchecked Sendable {
             XCTAssertEqual(meta["parents"] as? [String], ["FOLDER"])
             sessions += 1
             received = Data()
-            return .http(200, ["Location": "https://upload.example/session\(sessions)?upload_id=X\(sessions)"], Data())
+            return .http(200, ["Location": "https://www.googleapis.com/upload/session\(sessions)?upload_id=X\(sessions)"], Data())
         }
         let cr = r.header("Content-Range") ?? ""
         contentRanges.append(cr)
@@ -171,6 +171,21 @@ final class ResumableUploadTests: XCTestCase {
         XCTAssertEqual(post.url.host, "www.googleapis.com")
         XCTAssertEqual(post.url.path, "/upload/drive/v3/files")
         XCTAssertEqual(post.query["fields"], "id,name,md5Checksum,size")
+    }
+
+    func testUntrustedSessionURIRejectedAndNoPUT() async throws {
+        let n = chunk
+        let (url, _) = makeFile(bytes: n, in: dir)
+        StubProtocol.setHandler { r in
+            .http(200, ["Location": "https://evil.example.com/upload?upload_id=X"], Data())
+        }
+        do {
+            _ = try await upload(makeDrive(), url, n, expected: nil)
+            XCTFail("expected throw")
+        } catch let e as DriveError {
+            XCTAssertEqual(e, .untrustedSessionURI)
+        }
+        XCTAssertTrue(StubProtocol.recorded.allSatisfy { $0.method != "PUT" })
     }
 
     func test308PartialRangeResumes() async throws {
