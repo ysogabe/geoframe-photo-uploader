@@ -13,6 +13,15 @@ public struct UploadEvent: Sendable, Equatable {
     public let index: Int
     public let total: Int
     public let phase: UploadPhase
+    /// `.uploading` のときの送信済みバイト数 / 全体のバイト数（分かるときだけ）
+    public var bytesSent: Int64? = nil
+    public var bytesTotal: Int64? = nil
+
+    public init(localIdentifier: String, index: Int, total: Int, phase: UploadPhase,
+                bytesSent: Int64? = nil, bytesTotal: Int64? = nil) {
+        self.localIdentifier = localIdentifier; self.index = index; self.total = total; self.phase = phase
+        self.bytesSent = bytesSent; self.bytesTotal = bytesTotal
+    }
 }
 
 public enum ItemStatus: String, Codable, Sendable {
@@ -122,8 +131,9 @@ public final class UploadCoordinator: @unchecked Sendable {
 
         for (i, item) in items.enumerated() {
             if Task.isCancelled { cancelled = true; break }
-            let emit: @Sendable (UploadPhase) -> Void = { phase in
-                onEvent?(UploadEvent(localIdentifier: item.localIdentifier, index: i, total: items.count, phase: phase))
+            let emit: @Sendable (UploadPhase, (Int64, Int64)?) -> Void = { phase, bytes in
+                onEvent?(UploadEvent(localIdentifier: item.localIdentifier, index: i, total: items.count, phase: phase,
+                                     bytesSent: bytes?.0, bytesTotal: bytes?.1))
             }
             let (result, exported) = await process(item: item, folderId: folderId, remote: &remote,
                                                    inBatch: &inBatch, emit: emit)
@@ -141,7 +151,7 @@ public final class UploadCoordinator: @unchecked Sendable {
             }
             updateCache(item: item, result: result, remote: remote, folderId: folderId)
             results.append(result)
-            emit(.finished(result))
+            emit(.finished(result), nil)
             if result.error == Self.cancelledMessage { cancelled = true; break }
         }
         return RunSummary(runId: runId, folderId: folderId, remoteFileCount: remoteCount, results: results, cancelled: cancelled)
@@ -179,7 +189,7 @@ public final class UploadCoordinator: @unchecked Sendable {
     }
 
     private func process(item: PhotoItem, folderId: String, remote: inout RemoteIndex,
-                         inBatch: inout [String: String], emit: @escaping @Sendable (UploadPhase) -> Void) async -> (ItemResult, ExportedOriginal?) {
+                         inBatch: inout [String: String], emit: @escaping @Sendable (UploadPhase, (Int64, Int64)?) -> Void) async -> (ItemResult, ExportedOriginal?) {
         var r = ItemResult(localIdentifier: item.localIdentifier, originalFilename: item.originalFilename, status: .failed,
                            verified: false)
         guard case .eligible = item.eligibility, let mime = item.mimeType else {
@@ -194,7 +204,7 @@ public final class UploadCoordinator: @unchecked Sendable {
             let first = inBatch[cmd5]
             let hit = remote.lookup(cmd5)
             if first != nil || hit != nil {
-                emit(.checkingDuplicate)
+                emit(.checkingDuplicate, nil)
                 r.md5 = cmd5; r.sha256 = cached.sha256; r.byteCount = cached.byteCount; r.md5FromCache = true
                 r.status = .skippedDuplicate
                 if let first { r.duplicateOfLocalIdentifier = first } else { r.duplicateOfFileId = hit?.id }
@@ -202,7 +212,7 @@ public final class UploadCoordinator: @unchecked Sendable {
             }
         }
 
-        emit(.exporting)
+        emit(.exporting, nil)
         let exp: ExportedOriginal
         do { exp = try await exporter.export(localIdentifier: item.localIdentifier) } catch {
             r.error = error is CancellationError ? Self.cancelledMessage : "原本の取得に失敗: \(error.localizedDescription)"
@@ -210,7 +220,7 @@ public final class UploadCoordinator: @unchecked Sendable {
         }
         r.md5 = exp.md5Hex; r.sha256 = exp.sha256Hex; r.byteCount = exp.byteCount; r.dataSource = exp.dataSource
 
-        emit(.checkingDuplicate)
+        emit(.checkingDuplicate, nil)
         // 同一実行内の先行アイテムを優先して報告し、その後に実行開始時点の Drive 一覧と照合
         if let first = inBatch[exp.md5Hex] {
             r.status = .skippedDuplicate
@@ -224,13 +234,15 @@ public final class UploadCoordinator: @unchecked Sendable {
         }
         if Task.isCancelled { r.error = Self.cancelledMessage; return (r, exp) }
 
-        emit(.uploading(fraction: 0))
+        emit(.uploading(fraction: 0), (0, exp.byteCount))
         let uploaded: DriveFile
         do {
             uploaded = try await drive.uploadResumable(
                 fileURL: exp.fileURL, name: item.driveName, mimeType: mime, folderId: folderId,
                 byteCount: exp.byteCount, expectedMD5: exp.md5Hex,
-                progress: { sent, total in emit(.uploading(fraction: total > 0 ? Double(sent) / Double(total) : 1)) })
+                progress: { sent, total in
+                    emit(.uploading(fraction: total > 0 ? Double(sent) / Double(total) : 1), (sent, total))
+                })
         } catch DriveError.md5Mismatch(let id, let expected, let actual) {
             // Drive にファイルは作成済み。自動で再送・削除はしない。
             r.driveFileId = id
@@ -250,7 +262,7 @@ public final class UploadCoordinator: @unchecked Sendable {
         r.driveMd5Checksum = uploaded.md5Checksum
         inBatch[exp.md5Hex] = item.localIdentifier
 
-        emit(.verifying)
+        emit(.verifying, nil)
         // (b) 新しい一覧で fileId と md5 を確認（結果整合性のため数回リトライ）
         var lastProblem = "一覧に fileId が見つかりません"
         for attempt in 1...max(1, options.verifyAttempts) {

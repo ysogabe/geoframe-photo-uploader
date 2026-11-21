@@ -1,4 +1,5 @@
 import SwiftUI
+import UploaderCore
 
 /// 選択操作・重複確認・送信・中止と全体の進捗。
 struct ActionBarView: View {
@@ -15,17 +16,34 @@ struct ActionBarView: View {
                 .foregroundStyle(.secondary)
             Toggle("送信済み・重複を隠す", isOn: $model.hideDone)
                 .toggleStyle(.checkbox)
+                .fixedSize()
                 .help("前回までに送信済み、または Drive に同じ内容があると分かっている写真を一覧から隠します")
+            Toggle("選んだら自動で重複確認", isOn: $model.autoPrecheckEnabled)
+                .toggleStyle(.checkbox)
+                .fixedSize()
+                .disabled(!model.canAutoPrecheck)
+                .help(model.canAutoPrecheck
+                      ? "写真を選ぶたびに、新しく選んだ写真だけを Drive と照合し、重複なら選択から外します（送信はしません）"
+                      : "Google に接続し、写真ライブラリのフルアクセスを許可すると使えます")
 
             Spacer()
 
             if let p = model.progress {
                 progressView(p)
+            } else if let a = model.autoProgress {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(AutoPrecheckText.progress(current: a.current, total: a.total))
+                        .font(.callout)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
             } else if !model.selection.isEmpty, let hint = disabledHint {
                 Text(hint).font(.caption).foregroundStyle(.orange)
             }
 
-            if model.isSending || model.isPrechecking {
+            // 送信中の「中止」は送信パネルにある
+            if model.isPrechecking {
                 Button(role: .destructive) {
                     model.cancelRun()
                 } label: {
@@ -67,7 +85,7 @@ struct ActionBarView: View {
                 .monospacedDigit()
             ProgressView(value: Double(p.done), total: Double(max(p.total, 1)))
                 .progressViewStyle(.linear)
-                .frame(width: 160)
+                .frame(minWidth: 60, idealWidth: 160, maxWidth: 160)
         }
     }
 }

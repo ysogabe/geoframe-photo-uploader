@@ -25,11 +25,16 @@ public actor UploaderService {
     private let log: @Sendable (String) -> Void
     private var auth: GoogleAuth?
     private var injectedCache: ResultCache?
+    /// 自動重複確認で使い回す Drive フォルダ一覧（送信後・ログアウトで捨てる）
+    private var listing: RemoteListingSnapshot? { didSet { if listing == nil { listingGeneration &+= 1 } } }
+    private var listingGeneration = 0
+    private let now: @Sendable () -> Date
 
     /// `cache` を省略すると `paths.itemCacheFile` を初回利用時に開く（無ければ records.jsonl から作る）。
     public init(paths: AppPaths = AppPaths(), tokenStore: RefreshTokenStore = KeychainTokenStore(),
                 session: URLSession = .shared, cache: ResultCache? = nil,
-                log: @escaping @Sendable (String) -> Void = { _ in }) {
+                log: @escaping @Sendable (String) -> Void = { _ in }, now: @escaping @Sendable () -> Date = { Date() }) {
+        self.now = now
         self.paths = paths
         self.tokenStore = tokenStore
         self.session = session
@@ -122,6 +127,7 @@ public actor UploaderService {
     public func signOut() async {
         if let auth { await auth.signOut() } else { await GoogleAuth.signOut(store: tokenStore, session: session) }
         auth = nil
+        listing = nil
     }
 
     public func driveClient() throws -> DriveClient {
@@ -156,6 +162,9 @@ public actor UploaderService {
         let folder = try await resolveFolderId()
         let exporter = try OriginalExporter()
         defer { exporter.cleanup() }
+        // 送信で Drive の中身が変わるので、使い回している一覧は捨てる
+        listing = nil
+        defer { listing = nil }
         let coordinator = UploadCoordinator(drive: try driveClient(), exporter: exporter,
                                             records: RecordStore(fileURL: paths.recordsFile), cache: resultCache(), log: log)
         return try await coordinator.run(items: items, folderId: folder, maxItemsPerRun: maxItemsPerRun, onEvent: onEvent)
@@ -187,4 +196,37 @@ public actor UploaderService {
     public func thumbnail(localIdentifier: String, size: CGSize) async -> CGImage? {
         await PhotoLibrary.shared.thumbnailCGImage(for: localIdentifier, size: size)
     }
+
+    // MARK: 自動重複確認
+
+    /// セッション内で使い回す Drive フォルダ一覧。同じフォルダで 5 分以内に取ったものがあればそれを、無ければ取り直す。
+    public func sessionRemoteIndex(maxAge: TimeInterval = RemoteListingSnapshot.defaultMaxAge) async throws
+        -> (folderId: String, remote: RemoteIndex) {
+        let folder = try await resolveFolderId()
+        if let l = listing, l.isUsable(folderId: folder, now: now(), maxAge: maxAge) { return (folder, l.index) }
+        let gen = listingGeneration
+        let index = RemoteIndex(files: try await driveClient().listFolderFiles(folderId: folder))
+        // 取得中に送信・ログアウトで捨てられていたら覚えない（古い一覧を使い回さない）
+        if gen == listingGeneration {
+            listing = RemoteListingSnapshot(folderId: folder, index: index, fetchedAt: now())
+        }
+        return (folder, index)
+    }
+
+    /// 使い回している Drive 一覧を捨てる（次の自動確認で取り直す）。
+    public func invalidateRemoteListing() { listing = nil }
+
+    /// 選んだ写真 1 枚の重複確認（選んだら自動で重複確認）。キャッシュの MD5 が有効なら書き出さない。
+    /// `priorSelected` は MD5 が分かっている他の選択中の写真（選択内の重複の判定用）。
+    /// Drive 一覧の取得・認証の失敗は投げる。原本の取得失敗は `.notHashed` の結果で返す。
+    public func autoPrecheck(item: PhotoItem, priorSelected: [PlanInput]) async throws -> PrecheckResult {
+        try await PhotoLibrary.ensureAuthorized()
+        let (folder, remote) = try await sessionRemoteIndex()
+        try Task.checkCancellation()
+        let exporter = try OriginalExporter()
+        defer { exporter.cleanup() }
+        return try await DuplicatePrecheck.checkOne(item: item, priorSelected: priorSelected, exporter: exporter,
+                                                    remote: remote, cache: resultCache(), folderId: folder)
+    }
 }
+

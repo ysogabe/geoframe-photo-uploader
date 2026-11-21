@@ -177,4 +177,5 @@ final class EventBox: @unchecked Sendable {
     private var events: [UploadEvent] = []
     func add(_ e: UploadEvent) { lock.lock(); events.append(e); lock.unlock() }
     var phases: [UploadPhase] { lock.lock(); defer { lock.unlock() }; return events.map(\.phase) }
+    var all: [UploadEvent] { lock.lock(); defer { lock.unlock() }; return events }
 }

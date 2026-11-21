@@ -64,7 +64,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var items: [PhotoItem] = []
     @Published private(set) var hasLoaded = false
     @Published private(set) var isLoading = false
-    @Published private(set) var selection: Set<String> = []
+    @Published private(set) var selection: Set<String> = [] {
+        didSet { if selection != oldValue { selectionDidChange(from: oldValue) } }
+    }
     /// 読み込み時点の item-cache.json（前回までの結果）。読み込み直すまで固定する
     @Published private(set) var cachedEntries: [String: CacheEntry] = [:]
     /// 「送信済み・重複を隠す」
@@ -89,6 +91,38 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastSummary: RunSummary?
     @Published private(set) var lastRunItems: [PhotoItem] = []
 
+    // 選んだら自動で重複確認
+    static let autoPrecheckKey = "autoPrecheckOnSelect"
+    /// 「選んだら自動で重複確認」（UserDefaults に保存、既定オフ）
+    @Published var autoPrecheckEnabled: Bool = UserDefaults.standard.bool(forKey: AppModel.autoPrecheckKey) {
+        didSet {
+            guard autoPrecheckEnabled != oldValue else { return }
+            UserDefaults.standard.set(autoPrecheckEnabled, forKey: Self.autoPrecheckKey)
+            if autoPrecheckEnabled { selectionDidChange(from: []) } else { cancelAutoPrecheck() }
+        }
+    }
+    /// 自動確認の進捗（「重複を確認中 2/5」。何もしていなければ nil）
+    @Published private(set) var autoProgress: (current: Int, total: Int)?
+    /// 自動確認で処理中の写真（セルに「重複を確認中」を出す）
+    @Published private(set) var autoCheckingId: String?
+    private var autoQueue = AutoPrecheckQueue()
+    private var autoGeneration = 0
+    private var autoDebounceTask: Task<Void, Never>?
+    private var autoWorkerTask: Task<Void, Never>?
+    private var autoItemTask: Task<PrecheckResult, Error>?
+    /// このまとまりで重複のため選択から外した写真の名前（バナー用）
+    private var autoDeselectedNames: [String] = []
+    static let autoDebounceNanoseconds: UInt64 = 300_000_000
+
+    // 送信パネル
+    /// 送信パネルを出しているか（送信中と、終わった後の結果表示。「閉じる」まで）
+    @Published private(set) var showSendPanel = false
+    @Published private(set) var sendRun: SendRunState?
+    /// 送信が始められなかった・途中で止まったときのエラー（パネルに出す）
+    @Published private(set) var runError: String?
+    /// 直前の送信を中止したか（パネルの結果表示用）
+    @Published private(set) var runWasCancelled = false
+
     // 確認ダイアログ（20 件超）
     @Published var showSendConfirm = false
     @Published private(set) var pendingSend: [PhotoItem] = []
@@ -110,7 +144,8 @@ final class AppModel: ObservableObject {
 
     // MARK: 派生値
 
-    var isBusy: Bool { isSending || isPrechecking || isLoading }
+    var isBusy: Bool { isSending || isPrechecking || isLoading || showSendPanel }
+    var isAutoPrechecking: Bool { autoProgress != nil }
     var photosAuthorized: Bool { status?.photosAuthorization == .authorized }
     var googleReady: Bool {
         guard let s = status else { return false }
@@ -166,6 +201,12 @@ final class AppModel: ObservableObject {
     var canPrecheck: Bool { canSend }
     var recordsFile: String? { status?.recordsFile }
 
+    /// 送信中・直前の送信のアイテム。
+    func runItem(for localIdentifier: String) -> PhotoItem? {
+        lastRunItems.first(where: { $0.localIdentifier == localIdentifier })
+            ?? items.first(where: { $0.localIdentifier == localIdentifier })
+    }
+
     func displayName(for localIdentifier: String) -> String {
         let all = items + lastRunItems
         return all.first(where: { $0.localIdentifier == localIdentifier })?.driveName ?? localIdentifier
@@ -201,6 +242,7 @@ final class AppModel: ObservableObject {
         let s = await service.status()
         status = s
         if !s.signedIn || !s.oauthClientValid {
+            cancelAutoPrecheck()
             folderId = nil
             folderResolveAttempted = false
             return
@@ -278,7 +320,9 @@ final class AppModel: ObservableObject {
 
     func signOut() {
         Task {
+            cancelAutoPrecheck()
             await service.signOut()
+            cancelAutoPrecheck()
             folderId = nil
             prechecks = [:]
             folderResolveAttempted = false
@@ -298,6 +342,7 @@ final class AppModel: ObservableObject {
         guard !isBusy else { return }
         let to = dateMode == .single ? fromDate : toDate
         let range = LocalTime.dayRange(from: fromDate, to: to)
+        cancelAutoPrecheck()
         isLoading = true
         Task {
             defer { isLoading = false }
@@ -306,6 +351,7 @@ final class AppModel: ObservableObject {
                 cachedEntries = await service.cachedEntries(for: loaded)
                 items = loaded
                 hasLoaded = true
+                cancelAutoPrecheck()
                 selection = []
                 results = [:]
                 prechecks = [:]
@@ -344,6 +390,7 @@ final class AppModel: ObservableObject {
     func precheck() {
         let snapshot = selectedItems
         guard canPrecheck, !snapshot.isEmpty else { return }
+        cancelAutoPrecheck()
         isPrechecking = true
         cancelRequested = false
         isCancelling = false
@@ -419,7 +466,12 @@ final class AppModel: ObservableObject {
 
     private func startUpload(_ snapshot: [PhotoItem]) {
         guard canSend, !snapshot.isEmpty else { return }
+        cancelAutoPrecheck()
         isSending = true
+        showSendPanel = true
+        runError = nil
+        runWasCancelled = false
+        sendRun = SendRunState(order: snapshot.map(\.id))
         cancelRequested = false
         isCancelling = false
         lastSummary = nil
@@ -446,6 +498,7 @@ final class AppModel: ObservableObject {
 
     private func apply(_ ev: UploadEvent) {
         let id = ev.localIdentifier
+        if var r = sendRun, r.apply(ev) { sendRun = r }
         if var p = progress, p.kind == .upload {
             p.current = ev.index + 1
             p.total = ev.total
@@ -466,6 +519,7 @@ final class AppModel: ObservableObject {
     }
 
     private func finishRun(_ s: RunSummary) {
+        runWasCancelled = s.cancelled || cancelRequested
         for r in s.results { results[r.localIdentifier] = r }
         lastSummary = s
         endRun()
@@ -480,10 +534,13 @@ final class AppModel: ObservableObject {
 
     private func failRun(_ error: Error) {
         let wasCancel = cancelRequested
+        runWasCancelled = wasCancel
         endRun()
         if wasCancel {
+            runError = "送信を中止しました"
             showBanner(.info, "送信を中止しました")
         } else {
+            runError = "送信できませんでした: \(Redactor.redact(error.localizedDescription))"
             showError("送信できませんでした", error)
         }
     }
@@ -518,5 +575,132 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func dismissSummary() { lastSummary = nil }
+    /// 送信パネルの「閉じる」（送信中は閉じない）。
+    func closeSendPanel() {
+        guard !isSending else { return }
+        showSendPanel = false
+        sendRun = nil
+        runError = nil
+    }
+
+    // MARK: 選んだら自動で重複確認
+
+    /// このセッションの Drive 一覧で判定済みの写真。
+    private var settledIds: Set<String> {
+        Set(items.lazy.map(\.id).filter {
+            AutoPrecheckQueue.isSettled(precheck: self.prechecks[$0], result: self.results[$0])
+        })
+    }
+
+    var canAutoPrecheck: Bool { googleReady && photosAuthorized && !isSigningIn }
+
+    private func selectionDidChange(from old: Set<String>) {
+        guard autoPrecheckEnabled else { return }
+        guard canAutoPrecheck, !isSending, !isPrechecking, !isLoading else {
+            if !autoQueue.isIdle { cancelAutoPrecheck() }
+            return
+        }
+        let added = AutoPrecheckQueue.candidates(items: items, oldSelection: old, newSelection: selection,
+                                                 settled: settledIds)
+        if autoQueue.selectionChanged(selection: selection, added: added) {
+            // 処理中の写真が選択から外れた
+            autoItemTask?.cancel()
+        }
+        updateAutoProgress()
+        guard !autoQueue.isIdle, autoWorkerTask == nil else { return }
+        // 続けて選んだときはまとめて始める
+        autoDebounceTask?.cancel()
+        let gen = autoGeneration
+        autoDebounceTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.autoDebounceNanoseconds)
+            guard !Task.isCancelled, let self, self.autoGeneration == gen else { return }
+            self.autoDebounceTask = nil
+            self.startAutoWorker()
+        }
+    }
+
+    private func startAutoWorker() {
+        guard autoWorkerTask == nil, !autoQueue.isIdle else { return }
+        let gen = autoGeneration
+        autoWorkerTask = Task { [weak self] in
+            await self?.runAutoWorker(generation: gen)
+        }
+    }
+
+    private func runAutoWorker(generation gen: Int) async {
+        defer { if autoGeneration == gen { autoWorkerTask = nil } }
+        while autoGeneration == gen, let id = autoQueue.next() {
+            updateAutoProgress()
+            guard let item = items.first(where: { $0.id == id }), selection.contains(id) else {
+                finishAutoItem(id, counted: false)
+                continue
+            }
+            // 既に MD5 が分かっている他の選択中の写真（表示順）。同じ MD5 なら先に選ばれていた方を残す
+            let prior: [PlanInput] = items.compactMap { it in
+                guard it.id != id, selection.contains(it.id),
+                      let md5 = prechecks[it.id]?.md5 ?? results[it.id]?.md5 else { return nil }
+                return PlanInput(localIdentifier: it.id, eligibility: it.eligibility, md5: md5)
+            }
+            let svc = service
+            let t = Task { try await svc.autoPrecheck(item: item, priorSelected: prior) }
+            autoItemTask = t
+            do {
+                let r = try await t.value
+                guard autoGeneration == gen else { return }
+                autoItemTask = nil
+                if !selection.contains(id) {
+                    // 確認中に外された（ハッシュはキャッシュに残る）
+                    finishAutoItem(id, counted: false)
+                    continue
+                }
+                prechecks[id] = r
+                if AutoPrecheckQueue.shouldDeselect(r.decision) {
+                    autoDeselectedNames.append(item.driveName)
+                    selection.remove(id)
+                } else if hideDone {
+                    pruneHiddenSelection()
+                }
+                finishAutoItem(id, counted: true)
+            } catch {
+                guard autoGeneration == gen else { return }
+                autoItemTask = nil
+                if error is CancellationError || Task.isCancelled || (error as? URLError)?.code == .cancelled {
+                    finishAutoItem(id, counted: false)
+                    continue
+                }
+                // Drive 一覧・認証の失敗。残りも同じ理由で失敗するので止める
+                showError("自動の重複確認に失敗しました", error)
+                cancelAutoPrecheck()
+                return
+            }
+        }
+    }
+
+    private func finishAutoItem(_ id: String, counted: Bool) {
+        if autoQueue.finish(id, counted: counted) {
+            if let msg = AutoPrecheckText.deselectedBanner(names: autoDeselectedNames) { showBanner(.info, msg) }
+            autoDeselectedNames = []
+        }
+        updateAutoProgress()
+    }
+
+    private func updateAutoProgress() {
+        if autoCheckingId != autoQueue.inFlight { autoCheckingId = autoQueue.inFlight }
+        let p = autoQueue.progress
+        if p?.current != autoProgress?.current || p?.total != autoProgress?.total { autoProgress = p }
+    }
+
+    /// 自動確認をすべて止める（読み込み・ログアウト・送信・手動の重複確認・オフ）。
+    func cancelAutoPrecheck() {
+        autoGeneration &+= 1
+        autoDebounceTask?.cancel()
+        autoDebounceTask = nil
+        autoItemTask?.cancel()
+        autoItemTask = nil
+        autoWorkerTask?.cancel()
+        autoWorkerTask = nil
+        autoQueue.reset()
+        autoDeselectedNames = []
+        if autoProgress != nil { autoProgress = nil }
+    }
 }

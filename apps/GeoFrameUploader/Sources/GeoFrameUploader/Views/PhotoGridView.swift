@@ -22,7 +22,7 @@ struct PhotoGridView: View {
                                 item: item,
                                 isSelected: model.selection.contains(item.id),
                                 isSelectable: model.isSelectable(item),
-                                live: model.livePhases[item.id],
+                                live: model.livePhases[item.id] ?? (model.autoCheckingId == item.id ? .checkingDuplicate : nil),
                                 result: model.results[item.id],
                                 precheck: model.prechecks[item.id],
                                 cached: model.cachedStatus(for: item),
