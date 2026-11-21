@@ -1,5 +1,6 @@
 .build/
 *.app/
+.DS_Store
 tools/md5-precheck/out/
-.serena/cache/
+.serena/
 apps/GeoFrameUploader/out/
