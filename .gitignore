@@ -1,0 +1,4 @@
+.build/
+*.app/
+tools/md5-precheck/out/
+.serena/cache/

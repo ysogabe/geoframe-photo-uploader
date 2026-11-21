@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>dev.local.geoframe.md5precheck</string>
+  <key>CFBundleName</key><string>MD5Precheck</string>
+  <key>CFBundleExecutable</key><string>MD5Precheck</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.1</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSUIElement</key><true/>
+  <key>NSPhotoLibraryUsageDescription</key><string>geoframe 重複判定の前提検証のため、指定写真の原本バイト列の MD5 を計算します（読み取りのみ）。</string>
+</dict>
+</plist>
