@@ -1,6 +1,6 @@
 # 技術設計書
 
-GeoFrame Uploader は、Apple Photos の写真原本を一切再エンコードせずに Google Drive「GeoFrame」フォルダへ安全に届ける macOS ネイティブアプリです。UI 非依存のコアロジック（`UploaderCore`）と、それを共有する SwiftUI アプリ / CLI（`GeoFrameUploader`）の 2 層で構成しています。
+GeoFrame Uploader は、Apple Photos の写真原本を一切再エンコードせずに Google ドライブ「GeoFrame」フォルダへ安全に届ける macOS ネイティブアプリです。UI 非依存のコアロジック（`UploaderCore`）と、それを共有する SwiftUI アプリ / CLI（`GeoFrameUploader`）の 2 層で構成しています。
 
 ## 1. ディレクトリとモジュール構成
 
@@ -59,7 +59,7 @@ apps/GeoFrameUploader/
 
 ## 3. Google OAuth 2.0 とセキュリティ境界
 
-認証方式の選定経緯は [Drive 接続方式の評価と決定](drive-connection-decision.md) を参照してください。
+認証方式の選定経緯は [Google ドライブ接続方式の評価と決定](drive-connection-decision.md) を参照してください。
 
 - **認可フロー（`GoogleAuth` + `LoopbackServer`）**:
   - ユーザー自身の「デスクトップ アプリ」用 OAuth クライアントと PKCE（S256）を使用します。
@@ -85,16 +85,16 @@ apps/GeoFrameUploader/
 1. 再開可能アップロード完了レスポンスに含まれる `md5Checksum` の照合。
 2. 対象フォルダに対して `files.list` を再実行し（必要に応じてリトライ）、返却されたファイル一覧内に該当 `fileId` と一致する `md5Checksum` が存在することを確認。
 
-## 5. 重複チェックとローカルキャッシュ
+## 5. 重複確認とローカルキャッシュ
 
 ### 重複判定の原則
-- 重複判定の真実のソース（Source of Truth）は常に **Google Drive フォルダ内の `files.list`（`md5Checksum` 一覧）** です。
+- 重複判定の真実のソース（Source of Truth）は常に **Google ドライブ フォルダ内の `files.list`（`md5Checksum` 一覧）** です。
 - 同一バッチ内で同じ MD5 の写真が複数選ばれた場合は、先頭の 1 枚だけを送信し、2 枚目以降は `skipped_duplicate`（`duplicateOfLocalIdentifier` を記録）とします。
 
 ### 自動重複確認（`AutoPrecheckQueue` & `RemoteListingSnapshot`）
 - 「選んだら自動で重複確認」がオンの場合、`AppModel` が選択差分から未判定の対象写真を抽出し、連続選択をまとめるため **0.3 秒（300 ms）デバウンス** した上で `AutoPrecheckQueue` により 1 枚ずつ直列確認します。
 - 確認中に選択が解除されたアイテムは待ち行列から破棄し、処理中のアイテムが解除された場合はその確認タスクをキャンセルします。
-- Drive フォルダ一覧はセッション内で **5 分間（300 秒）** スナップショットとして再利用し、選択のたびに `files.list` を連打しないようにしています（送信完了・ログアウト・手動「重複を確認」時は最新を取得します）。
+- Google ドライブのフォルダ一覧はセッション内で **5 分間（300 秒）** スナップショットとして再利用し、選択のたびに `files.list` を連打しないようにしています（送信完了・ログアウト・手動「重複を確認」時は最新を取得します）。
 
 ### `item-cache.json` と `records.jsonl` の連携（`ResultCache`）
 - `records.jsonl` は 1 枚処理するごとに `O_WRONLY | O_CREAT | O_APPEND`（`0600`）で 1 行 JSON を追記します。

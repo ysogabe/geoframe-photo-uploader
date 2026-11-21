@@ -1,12 +1,12 @@
 # Google Cloud 側の準備（ユーザー操作・初回のみ）
 
-GeoFrame Uploader が Google Drive API を使うには、**あなた自身の Google Cloud プロジェクトに「デスクトップ アプリ」用の OAuth クライアント**が必要です。これは本人しかできない操作なので、アプリ側では自動化していません。所要時間はおよそ 10〜15 分です。
+GeoFrame Uploader が Google ドライブ API を使うには、**あなた自身の Google Cloud プロジェクトに「デスクトップ アプリ」用の OAuth クライアント**が必要です。これは本人しかできない操作なので、アプリ側では自動化していません。所要時間はおよそ 10〜15 分です。
 
-> 使う Google アカウント: GeoFrame フォルダを持っているアカウント（rclone の `gdrive:` と同じアカウント）。
+> 使う Google アカウント: GeoFrame フォルダを持っている Google アカウント。
 
 ## 0. 方式の選択（先に決める）
 
-Drive の既存ファイル一覧（重複判定用）を読み、フォルダへ書き込むために、スコープ `https://www.googleapis.com/auth/drive` を使います。これは Google の区分で「制限付き（restricted）」スコープです。公開ステータスによって次の違いがあります。
+Google ドライブの既存ファイル一覧（重複判定用）を読み、フォルダへ書き込むために、スコープ `https://www.googleapis.com/auth/drive` を使います。これは Google の区分で「制限付き（restricted）」スコープです。公開ステータスによって次の違いがあります。
 
 | 方式 | 7 日でログイン切れ | 「未確認のアプリ」警告 | 備考 |
 |---|---|---|---|
@@ -21,7 +21,7 @@ Drive の既存ファイル一覧（重複判定用）を読み、フォルダ�
 - A（個人モード）の場合: <https://console.cloud.google.com/auth/overview/personal> を開き、画面の案内に従って個人モードのアプリを作成する。この流れでプロジェクト設定と OAuth クライアントが同時に作られる場合は、手順 3 の「種類: デスクトップ アプリ」を確認したうえで手順 4 へ進む。
 - B / C の場合: <https://console.cloud.google.com/projectcreate> で新規プロジェクト（例: `geoframe-uploader`）を作成し、上部のプロジェクト選択でそのプロジェクトを選ぶ。
 
-## 2. Google Drive API を有効にする
+## 2. Google ドライブ API を有効にする
 
 <https://console.cloud.google.com/flows/enableapi?apiid=drive.googleapis.com> を開き、作成したプロジェクトで「有効にする」を押す。
 
@@ -57,4 +57,6 @@ chmod 600 ~/Library/Application\ Support/GeoFrameUploader/oauth-client.json
 
 ## 終わったら
 
-ここまで済んだら、エージェントに「OAuth クライアントを置いた」と伝えてください。次の確認を行います: ① `auth`、② 2026-04-19 の 1〜3 枚で実際に送信、③ Drive 側で md5Checksum が一致することの確認。
+1. `apps/GeoFrameUploader/scripts/cli.sh auth`（またはアプリの「Google に接続」）でログインします。
+2. 2026-04-19 など任意の日付から 1〜3 枚を選んで実際に送信してみます。
+3. Google ドライブの GeoFrame フォルダで、送った写真の `md5Checksum` が元の写真と一致することを確認します（アプリは送信後に自動で照合し、結果を画面と `records.jsonl` に記録します）。
