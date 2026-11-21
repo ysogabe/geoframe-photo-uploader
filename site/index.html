@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#07131c">
-  <meta name="description" content="GeoFrame Uploader は、Apple Photos（PhotoKit）の原本バイト列を一切加工せず、MD5 重複チェックと再開可能アップロードで Google Drive「GeoFrame」へ届ける macOS ネイティブアプリです。">
+  <meta name="description" content="GeoFrame Uploader は、Apple Photos（PhotoKit）の原本バイト列を一切加工せず、MD5 重複確認と再開可能アップロードで Google ドライブ「GeoFrame」へ届ける macOS ネイティブアプリです。">
   <title>GeoFrame Uploader — 写真の原本を、そのまま GeoFrame へ。</title>
   <meta property="og:type" content="website">
   <meta property="og:locale" content="ja_JP">
   <meta property="og:site_name" content="GeoFrame Uploader">
   <meta property="og:title" content="GeoFrame Uploader — 写真の原本を、そのまま GeoFrame へ。">
-  <meta property="og:description" content="Apple Photos の原本バイト列をそのまま Google Drive「GeoFrame」へ安全に送る macOS ネイティブアプリ。">
+  <meta property="og:description" content="Apple Photos の原本バイト列をそのまま Google ドライブ「GeoFrame」へ安全に送る macOS ネイティブアプリ。">
   <meta property="og:image" content="https://ysogabe.github.io/geoframe-photo-uploader/images/hero-banner.jpg">
   <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" type="image/png" href="images/app-icon.png">
@@ -32,7 +32,7 @@
       <a href="#faq">FAQ</a>
       <a href="#docs">ドキュメント</a>
     </nav>
-    <span class="stage-label"><span aria-hidden="true"></span>v1 リリース</span>
+    <span class="stage-label"><span aria-hidden="true"></span>v0.1（ソースからビルド）</span>
   </header>
 
   <main id="top">
@@ -42,7 +42,7 @@
         <h1 id="hero-title">写真の原本を、<br><span>そのまま GeoFrame へ。</span></h1>
         <p class="hero-lead">
           再エンコードしない。EXIF を削らない。同じ写真は二度送らない。<br class="wide-only">
-          Apple Photos から日付で選んだ写真の原本バイト列を、Google Drive「GeoFrame」直下へ安全に届ける macOS アプリです。
+          Apple Photos から日付で選んだ写真の原本バイト列を、Google ドライブ「GeoFrame」直下へ安全に届ける macOS アプリです。
         </p>
         <div class="hero-actions">
           <a class="button primary" href="https://github.com/ysogabe/geoframe-photo-uploader">GitHub で見る <span aria-hidden="true">↗</span></a>
@@ -67,7 +67,7 @@
           <span class="note-index">02</span>
           <div>
             <strong>MD5 で重複スキップ &amp; 二重検証</strong>
-            <p>Drive 一覧と事前照合し、送信後は応答と <code>files.list</code> の両方で検証</p>
+            <p>Google ドライブの一覧と事前照合し、送信後は応答と <code>files.list</code> の両方で検証</p>
           </div>
         </div>
         <div class="note-item">
@@ -85,7 +85,7 @@
       <figure class="shot shot-hero">
         <img src="images/hero-banner.jpg" width="1376" height="768" alt="Apple Photos の写真ライブラリから検証済みの原本データがクラウド上の GeoFrame へ流れるイメージ図">
         <figcaption>
-          <span><strong>Apple Photos → Google Drive「GeoFrame」</strong> 原本のバイト列と撮影時のメタデータを損なわず、重複を省いてクラウドへ届けます。</span>
+          <span><strong>Apple Photos → Google ドライブ「GeoFrame」</strong> 原本のバイト列と撮影時のメタデータを損なわず、重複を省いてクラウドへ届けます。</span>
           <span>イメージ図</span>
         </figcaption>
       </figure>
@@ -101,16 +101,16 @@
       </div>
 
       <div class="screen-tabs" role="tablist" aria-label="画面プレビュー切替">
-        <button type="button" role="tab" aria-selected="true" data-tab="main"><span>01</span>一覧と自動重複チェック</button>
+        <button type="button" role="tab" aria-selected="true" data-tab="main"><span>01</span>一覧と自動重複確認</button>
         <button type="button" role="tab" aria-selected="false" data-tab="sending"><span>02</span>送信モーダルパネル</button>
         <button type="button" role="tab" aria-selected="false" data-tab="overview"><span>03</span>全体ワークフロー図</button>
       </div>
 
       <div class="monitor-shell">
         <figure class="shot tab-pane" data-pane="main">
-          <img src="images/screen-main.png" width="1040" height="929" alt="GeoFrame Uploader の一覧画面。日付絞り込み、送信済み・重複バッジ、対象外表示、自動重複チェックの切り替えを表示">
+          <img src="images/screen-main.png" width="1040" height="929" alt="GeoFrame Uploader の一覧画面。日付絞り込み、送信済み・重複バッジ、対象外表示、自動重複確認の切り替えを表示">
           <figcaption>
-            <span><strong>一覧画面（見本）</strong> 単日 / 期間で写真を読み込み、前回結果バッジと形式判定を表示。「選んだら自動で重複確認」オン時は選択と同時に Drive と照合します。</span>
+            <span><strong>一覧画面（見本）</strong> 単日 / 期間で写真を読み込み、前回結果バッジと形式判定を表示。「選んだら自動で重複確認」オンにすると、選択した写真をすぐに（約 0.3 秒後）Google ドライブと照合します。</span>
             <span>見本画面</span>
           </figcaption>
         </figure>
@@ -126,7 +126,7 @@
         <figure class="shot tab-pane" data-pane="overview" hidden>
           <img src="images/overview.png" width="960" height="511" alt="GeoFrame Uploader の 3 ステップ全体構成図">
           <figcaption>
-            <span><strong>全体構成と処理フロー</strong> Apple Photos からの抽出、重複判定と再開可能アップロード、Drive 検証とローカル記録までの流れ。</span>
+            <span><strong>全体構成と処理フロー</strong> Apple Photos からの抽出、重複判定と再開可能アップロード、Google ドライブでの検証とローカル記録までの流れ。</span>
             <span>構成図</span>
           </figcaption>
         </figure>
@@ -155,8 +155,8 @@
         </article>
         <article class="feature">
           <span class="micro-label">AUTO PRECHECK</span>
-          <h3>選んだら自動で重複チェック</h3>
-          <p>写真を選択した瞬間にバックグラウンドで MD5 を計算して Drive 一覧（セッション内 5 分キャッシュ）と照合。重複が見つかった写真は自動で選択を外して通知します。</p>
+          <h3>選んだら自動で重複確認</h3>
+          <p>オンにすると、選択した写真をすぐに（約 0.3 秒後）バックグラウンドで確認します。MD5 を計算して Google ドライブの一覧（セッション内 5 分キャッシュ）と照合。重複が見つかった写真は自動で選択を外して通知します。</p>
         </article>
         <article class="feature">
           <span class="micro-label">RESUMABLE UPLOAD</span>
@@ -181,7 +181,7 @@
         <article class="feature">
           <span class="micro-label">GUI &amp; CLI</span>
           <h3>アプリと CLI で同じコアを共有</h3>
-          <p><code>UploaderCore</code> を共通化し、<code>scripts/cli.sh</code> から <code>status</code> / <code>scan</code> / <code>auth</code> / <code>upload</code> / <code>signout</code> を実行できます。<code>records.jsonl</code> も双方向で同期します。</p>
+          <p><code>UploaderCore</code> を共通化し、<code>scripts/cli.sh</code> から <code>status</code> / <code>scan</code> / <code>auth</code> / <code>upload</code> / <code>signout</code> を実行できます。GUI と CLI が同じ <code>records.jsonl</code> / <code>item-cache.json</code> を共有します。</p>
         </article>
       </div>
     </section>
@@ -192,7 +192,7 @@
           <p class="eyebrow">03 / Architecture &amp; Ecosystem</p>
           <h2 id="arch-title">撮ってから、飾るまで。<br class="mobile-only">GeoFrame エコシステム。</h2>
         </div>
-        <p class="section-aside">GeoFrame Uploader は「送り手」に専念し、<br>受け手（GEOFRAME）側は一切変更不要です。</p>
+        <p class="section-aside">GeoFrame Uploader は「送り手」に専念し、<br>GEOFRAME 側の既存の取り込みの仕組みにそのまま乗ります。</p>
       </div>
 
       <div class="pipeline-card">
@@ -209,13 +209,13 @@
           </li>
           <li>
             <span class="micro-label">03 / STORAGE</span>
-            <strong>Google Drive「GeoFrame」</strong>
+            <strong>Google ドライブ「GeoFrame」</strong>
             <p>マイドライブ直下に常に新規作成。上書き・改名・削除は一切行いません。</p>
           </li>
           <li>
             <span class="micro-label">04 / CATALOG &amp; VIEW</span>
             <strong><a href="https://ysogabe.github.io/geoframe/">GEOFRAME</a> &amp; <a href="https://ysogabe.github.io/miharashi/">Miharashi</a></strong>
-            <p>GEOFRAME が 10 分ごとに取り込み、Miharashi がキオスク画面へ美しく映します。</p>
+            <p>GEOFRAME が定期的に取り込み、Miharashi がキオスク画面へ美しく映します。</p>
           </li>
         </ol>
       </div>
@@ -243,11 +243,11 @@
           </details>
           <details>
             <summary>rclone ではなくネイティブ OAuth + Drive API を採用した理由は？</summary>
-            <p><code>rclone</code> の共有クライアント ID 廃止予定への対応に加え、<code>rclone copyto</code> による同名別内容ファイルの上書きリスクを避け、再開可能アップロード後の MD5 照合までアプリ内で完結させるためです。詳しくは <a href="https://github.com/ysogabe/geoframe-photo-uploader/blob/main/docs/drive-connection-decision.md">Drive 接続方式の評価と決定</a> に記録しています。</p>
+            <p><code>rclone</code> の共有クライアント ID は廃止予定（<a href="https://rclone.org/drive/#making-your-own-client-id">rclone 公式ドキュメント</a>）で、その対応に加え、<code>rclone copyto</code> による同名別内容ファイルの上書きリスクを避け、再開可能アップロード後の MD5 照合までアプリ内で完結させるためです。詳しくは <a href="https://github.com/ysogabe/geoframe-photo-uploader/blob/main/docs/drive-connection-decision.md">Google ドライブ接続方式の評価と決定</a> に記録しています。</p>
           </details>
           <details>
             <summary>ローカルキャッシュ（item-cache.json）を消しても重複送信しませんか？</summary>
-            <p>しません。重複判定の正は常に Google Drive フォルダの <code>files.list</code> にある <code>md5Checksum</code> です。キャッシュは書き出し省略と前回結果の表示高速化のために使っており、削除しても <code>records.jsonl</code> から再構築されます。</p>
+            <p>しません。重複判定の正は常に Google ドライブ フォルダの <code>files.list</code> にある <code>md5Checksum</code> です。キャッシュは書き出し省略と前回結果の表示高速化のために使っており、削除しても <code>records.jsonl</code> から再構築されます。</p>
           </details>
         </div>
       </div>
@@ -271,7 +271,7 @@
 
   <footer class="shell footer">
     <span>GeoFrame Uploader <span class="footer-separator">/</span> macOS Native PhotoKit Uploader</span>
-    <span>2026.11.21</span>
+    <span>2026</span>
   </footer>
 
   <script>
