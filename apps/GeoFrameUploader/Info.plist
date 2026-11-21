@@ -6,6 +6,8 @@
   <key>CFBundleName</key><string>GeoFrame Uploader</string>
   <key>CFBundleDisplayName</key><string>GeoFrame Uploader</string>
   <key>CFBundleExecutable</key><string>GeoFrameUploader</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundleIconName</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1</string>
   <key>CFBundleVersion</key><string>1</string>

@@ -1,0 +1,11 @@
+{
+  "fill" : "automatic",
+  "groups" : [
+    {
+      "layers" : [
+        { "image-name" : "tile.png", "name" : "tile" }
+      ]
+    }
+  ],
+  "supported-platforms" : { "squares" : "shared" }
+}

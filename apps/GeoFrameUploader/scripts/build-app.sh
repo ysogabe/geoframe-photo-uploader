@@ -10,6 +10,9 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/GeoFrameUploader"
 cp Info.plist "$APP/Contents/Info.plist"
+# アイコン: Icon Composer 形式（Resources/AppIcon.icon）を actool で Assets.car + AppIcon.icns にコンパイル
+ROOT="$(pwd -P)"
+xcrun actool "$ROOT/Resources/AppIcon.icon" --compile "$ROOT/$APP/Contents/Resources" --app-icon AppIcon --platform macosx --minimum-deployment-target 14.0 --output-partial-info-plist "$ROOT/.build/actool-partial.plist" --output-format human-readable-text >/dev/null
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 IDENTITY="${SIGN_IDENTITY:-}"
