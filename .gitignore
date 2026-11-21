@@ -4,3 +4,14 @@
 tools/md5-precheck/out/
 .serena/
 apps/GeoFrameUploader/out/
+
+# 誤コミット防止（アプリの設定・記録はリポジトリ外に置く設計）
+oauth-client.json
+client_secret*.json
+records.jsonl
+item-cache.json
+.env*
+
+# SwiftPM / Xcode のローカル状態
+.swiftpm/
+xcuserdata/
