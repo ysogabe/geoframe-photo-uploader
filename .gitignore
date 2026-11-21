@@ -2,3 +2,4 @@
 *.app/
 tools/md5-precheck/out/
 .serena/cache/
+apps/GeoFrameUploader/out/
