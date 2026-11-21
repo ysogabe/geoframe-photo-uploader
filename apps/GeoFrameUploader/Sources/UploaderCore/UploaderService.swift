@@ -14,6 +14,8 @@ public actor UploaderService {
         public var configError: String?
         public var appSupportDir: String
         public var recordsFile: String
+        public var itemCacheFile: String
+        public var itemCacheEntryCount: Int
         public var scopes: [String]
     }
 
@@ -22,13 +24,41 @@ public actor UploaderService {
     private let session: URLSession
     private let log: @Sendable (String) -> Void
     private var auth: GoogleAuth?
+    private var injectedCache: ResultCache?
 
+    /// `cache` を省略すると `paths.itemCacheFile` を初回利用時に開く（無ければ records.jsonl から作る）。
     public init(paths: AppPaths = AppPaths(), tokenStore: RefreshTokenStore = KeychainTokenStore(),
-                session: URLSession = .shared, log: @escaping @Sendable (String) -> Void = { _ in }) {
+                session: URLSession = .shared, cache: ResultCache? = nil,
+                log: @escaping @Sendable (String) -> Void = { _ in }) {
         self.paths = paths
         self.tokenStore = tokenStore
         self.session = session
+        self.injectedCache = cache
         self.log = log
+    }
+
+    // MARK: 結果キャッシュ
+
+    private func refreshedCacheCount() -> Int {
+        let c = resultCache()
+        c.refresh()
+        return c.count
+    }
+
+    /// サービスごとに 1 つ（以降はメモリ上の内容を使う）。
+    public func resultCache() -> ResultCache {
+        if let injectedCache { return injectedCache }
+        try? paths.ensureBaseDir()
+        let c = ResultCache(fileURL: paths.itemCacheFile, records: RecordStore(fileURL: paths.recordsFile), log: log)
+        injectedCache = c
+        return c
+    }
+
+    /// 読み込んだ写真のうち、キャッシュが有効なもの（通信しない）。records.jsonl の追記分を先に取り込む。
+    public func cachedEntries(for items: [PhotoItem]) -> [String: CacheEntry] {
+        let c = resultCache()
+        c.refresh()
+        return c.entries(for: items)
     }
 
     // MARK: 状態
@@ -50,7 +80,9 @@ public actor UploaderService {
         return Status(photosAuthorization: PhotoLibrary.currentAuthorization(),
                       oauthClientPresent: present, oauthClientValid: clientValid, oauthClientError: clientError,
                       signedIn: tokenStore.exists(), config: cfg, configError: cfgError,
-                      appSupportDir: paths.baseDir.path, recordsFile: paths.recordsFile.path, scopes: GoogleAuth.scopes)
+                      appSupportDir: paths.baseDir.path, recordsFile: paths.recordsFile.path,
+                      itemCacheFile: paths.itemCacheFile.path, itemCacheEntryCount: refreshedCacheCount(),
+                      scopes: GoogleAuth.scopes)
     }
 
     // MARK: 写真
@@ -125,7 +157,7 @@ public actor UploaderService {
         let exporter = try OriginalExporter()
         defer { exporter.cleanup() }
         let coordinator = UploadCoordinator(drive: try driveClient(), exporter: exporter,
-                                            records: RecordStore(fileURL: paths.recordsFile), log: log)
+                                            records: RecordStore(fileURL: paths.recordsFile), cache: resultCache(), log: log)
         return try await coordinator.run(items: items, folderId: folder, maxItemsPerRun: maxItemsPerRun, onEvent: onEvent)
     }
 
@@ -140,14 +172,16 @@ public actor UploaderService {
         return (stream, task)
     }
 
-    /// 送信前の重複確認（アップロードはしない）。原本を書き出して MD5 を計算し、Drive フォルダ一覧と照合する。
+    /// 送信前の重複確認（アップロードはしない）。原本の MD5（キャッシュにあれば書き出さない）を Drive フォルダ一覧と照合する。
     public func precheckDuplicates(items: [PhotoItem],
                                    onProgress: (@Sendable (Int, Int) -> Void)? = nil) async throws -> [PrecheckResult] {
         try await PhotoLibrary.ensureAuthorized()
-        let remote = try await remoteIndex()
+        let folder = try await resolveFolderId()
+        let remote = RemoteIndex(files: try await driveClient().listFolderFiles(folderId: folder))
         let exporter = try OriginalExporter()
         defer { exporter.cleanup() }
-        return try await DuplicatePrecheck.run(items: items, exporter: exporter, remote: remote, onProgress: onProgress)
+        return try await DuplicatePrecheck.run(items: items, exporter: exporter, remote: remote, cache: resultCache(),
+                                               folderId: folder, onProgress: onProgress)
     }
 
     public func thumbnail(localIdentifier: String, size: CGSize) async -> CGImage? {

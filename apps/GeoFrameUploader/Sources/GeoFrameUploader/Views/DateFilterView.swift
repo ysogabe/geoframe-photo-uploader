@@ -36,7 +36,9 @@ struct DateFilterView: View {
             Spacer()
 
             if model.hasLoaded {
-                Text("全 \(model.items.count) 件 / 対象 \(model.eligibleCount) 件 / 対象外 \(model.ineligibleCount) 件")
+                Text("全 \(model.items.count) 件 / 対象 \(model.eligibleCount) 件 / 対象外 \(model.ineligibleCount) 件"
+                     + " / 前回送信済み \(model.previouslySentCount) 件"
+                     + (model.hiddenCount > 0 ? "（\(model.hiddenCount) 件を非表示）" : ""))
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }

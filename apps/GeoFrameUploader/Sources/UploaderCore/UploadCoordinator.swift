@@ -46,6 +46,8 @@ public struct ItemResult: Codable, Sendable, Equatable {
     public var duplicateOfFileId: String?
     public var duplicateOfLocalIdentifier: String?
     public var error: String?
+    /// md5 / sha256 / byteCount を item-cache.json から取った（原本を書き出していない）
+    public var md5FromCache: Bool = false
 
     /// 中止により処理が打ち切られたアイテム（status は `.failed` のまま）。
     public var wasCancelled: Bool { status == .failed && error == UploadCoordinator.cancelledMessage }
@@ -84,15 +86,18 @@ public final class UploadCoordinator: @unchecked Sendable {
     private let drive: DriveClient
     private let exporter: OriginalExporting
     private let records: RecordStore?
+    private let cache: ResultCache?
     private let options: Options
     private let sleep: Sleeper
     private let log: @Sendable (String) -> Void
 
-    public init(drive: DriveClient, exporter: OriginalExporting, records: RecordStore?, options: Options = Options(),
+    public init(drive: DriveClient, exporter: OriginalExporting, records: RecordStore?, cache: ResultCache? = nil,
+                options: Options = Options(),
                 sleeper: @escaping Sleeper = defaultSleeper, log: @escaping @Sendable (String) -> Void = { _ in }) {
         self.drive = drive
         self.exporter = exporter
         self.records = records
+        self.cache = cache
         self.options = options
         self.sleep = sleeper
         self.log = log
@@ -105,6 +110,8 @@ public final class UploadCoordinator: @unchecked Sendable {
             throw UploadCoordinatorError.tooManyItems(selected: items.count, max: maxItemsPerRun)
         }
         let runId = UUID().uuidString
+        // 他のプロセスが追記した records.jsonl / item-cache.json を先に取り込む
+        cache?.refresh()
         // 実行開始時点のフォルダ一覧（新鮮な md5 集合）
         var remote = RemoteIndex(files: try await drive.listFolderFiles(folderId: folderId))
         let remoteCount = remote.count
@@ -121,13 +128,18 @@ public final class UploadCoordinator: @unchecked Sendable {
             let (result, exported) = await process(item: item, folderId: folderId, remote: &remote,
                                                    inBatch: &inBatch, emit: emit)
             exported?.remove()
+            var record = UploadRecord(runId: runId, item: item, exported: exported, result: result.status.record,
+                                      driveFileId: result.driveFileId, driveMd5Checksum: result.driveMd5Checksum,
+                                      verified: result.verified, error: result.error, folderId: folderId)
+            if exported == nil && result.md5FromCache {
+                record.md5 = result.md5; record.sha256 = result.sha256; record.byteCount = result.byteCount
+            }
             do {
-                try records?.append(UploadRecord(runId: runId, item: item, exported: exported, result: result.status.record,
-                                                 driveFileId: result.driveFileId, driveMd5Checksum: result.driveMd5Checksum,
-                                                 verified: result.verified, error: result.error, folderId: folderId))
+                try records?.append(record)
             } catch {
                 log("failed to append record: \(error.localizedDescription)")
             }
+            updateCache(item: item, result: result, remote: remote, folderId: folderId)
             results.append(result)
             emit(.finished(result))
             if result.error == Self.cancelledMessage { cancelled = true; break }
@@ -137,6 +149,35 @@ public final class UploadCoordinator: @unchecked Sendable {
 
     public static let cancelledMessage = "キャンセルされました"
 
+    /// 1 件の結果を item-cache.json に反映する（中止は失敗として残さない）。
+    private func updateCache(item: PhotoItem, result r: ItemResult, remote: RemoteIndex, folderId: String) {
+        guard let cache, r.status != .skippedIneligible else { return }
+        let freshHash = r.md5FromCache ? nil : r.md5
+        switch r.status {
+        case .sent where r.verified:
+            cache.recordStatus(item: item, status: .sent, driveFileId: r.driveFileId, folderId: folderId,
+                               md5: freshHash, sha256: r.sha256, byteCount: r.byteCount)
+        case .skippedDuplicate:
+            // 同一実行内の先行写真との重複は、先行写真が Drive に載った（一覧に入った）ときだけ「Drive に既存」
+            let fid = r.duplicateOfFileId ?? r.md5.flatMap { remote.lookup($0)?.id }
+            if r.duplicateOfFileId != nil || fid != nil {
+                cache.recordStatus(item: item, status: .duplicateRemote, driveFileId: (fid?.isEmpty ?? true) ? nil : fid,
+                                   folderId: folderId, md5: freshHash, sha256: r.sha256, byteCount: r.byteCount)
+            } else if let m = freshHash {
+                cache.recordHash(item: item, md5: m, sha256: r.sha256, byteCount: r.byteCount)
+            }
+        case .sent, .failed:
+            if r.wasCancelled || Task.isCancelled {
+                if let m = freshHash { cache.recordHash(item: item, md5: m, sha256: r.sha256, byteCount: r.byteCount) }
+            } else {
+                cache.recordStatus(item: item, status: .failed, driveFileId: r.driveFileId, folderId: folderId,
+                                   md5: freshHash, sha256: r.sha256, byteCount: r.byteCount)
+            }
+        case .skippedIneligible:
+            break
+        }
+    }
+
     private func process(item: PhotoItem, folderId: String, remote: inout RemoteIndex,
                          inBatch: inout [String: String], emit: @escaping @Sendable (UploadPhase) -> Void) async -> (ItemResult, ExportedOriginal?) {
         var r = ItemResult(localIdentifier: item.localIdentifier, originalFilename: item.originalFilename, status: .failed,
@@ -145,6 +186,20 @@ public final class UploadCoordinator: @unchecked Sendable {
             r.status = .skippedIneligible
             r.error = item.eligibility.reason ?? "形式非対応"
             return (r, nil)
+        }
+
+        // キャッシュの MD5 が実行開始時点の Drive 一覧（または同一実行内の先行写真）にあれば、書き出さずに重複とする。
+        // 無ければ通常どおり書き出す（送るにはバイト列が要る）。
+        if let cached = cache?.entry(for: item), let cmd5 = cached.md5?.lowercased(), !cmd5.isEmpty {
+            let first = inBatch[cmd5]
+            let hit = remote.lookup(cmd5)
+            if first != nil || hit != nil {
+                emit(.checkingDuplicate)
+                r.md5 = cmd5; r.sha256 = cached.sha256; r.byteCount = cached.byteCount; r.md5FromCache = true
+                r.status = .skippedDuplicate
+                if let first { r.duplicateOfLocalIdentifier = first } else { r.duplicateOfFileId = hit?.id }
+                return (r, nil)
+            }
         }
 
         emit(.exporting)

@@ -96,6 +96,7 @@ struct CLI {
     private mutating func status(_ service: UploaderService) async throws {
         let s = await service.status()
         report["status"] = CLI.json(s)
+        report["itemCacheEntryCount"] = s.itemCacheEntryCount
     }
 
     private mutating func auth(_ service: UploaderService) async throws {
@@ -129,6 +130,7 @@ struct CLI {
 
         // 遠隔 md5 集合（ファイル指定 → Drive 認証済みなら Drive → 無し）
         var remote: RemoteIndex?
+        var driveFolderId: String?
         if let p = value("--remote-md5-file") {
             remote = try RemoteMD5File.parse(Data(contentsOf: URL(fileURLWithPath: p)))
             report["remoteSource"] = "file"
@@ -137,6 +139,7 @@ struct CLI {
             if st.oauthClientValid && st.signedIn {
                 do {
                     remote = try await service.remoteIndex()
+                    driveFolderId = try? await service.resolveFolderId()
                     report["remoteSource"] = "drive"
                 } catch {
                     report["remoteError"] = Redactor.redact(error.localizedDescription)
@@ -146,35 +149,69 @@ struct CLI {
         report["remoteSource"] = report["remoteSource"] ?? "none"
         report["remoteMd5Count"] = remote?.count ?? NSNull()
 
+        // item-cache.json に有効な MD5 があれば書き出さない（--no-cache で常に書き出す）。計算したハッシュは書き戻す
+        let cache = await service.resultCache()
+        cache.refresh()
+        let useCache = !has("--no-cache")
+        report["useCache"] = useCache
         let exporter = try OriginalExporter()
         defer { exporter.cleanup() }
         var inputs: [PlanInput] = []
+        var cacheHits = 0
         for (i, item) in items.enumerated() {
             var md5: String?
             if item.eligibility.isEligible {
-                CLI.log("[\(i + 1)/\(items.count)] hashing \(item.originalFilename ?? item.localIdentifier)")
-                do {
-                    let e = try await exporter.export(localIdentifier: item.localIdentifier)
-                    e.remove()
-                    md5 = e.md5Hex
-                    entries[i]["md5"] = e.md5Hex
-                    entries[i]["sha256"] = e.sha256Hex
-                    entries[i]["byteCount"] = e.byteCount
-                    entries[i]["dataSource"] = e.dataSource.rawValue
-                    entries[i]["exif"] = CLI.json(e.exif)
-                } catch {
-                    entries[i]["hashError"] = Redactor.redact(error.localizedDescription)
+                if useCache, let cached = cache.entry(for: item), let m = cached.md5, !m.isEmpty {
+                    CLI.log("[\(i + 1)/\(items.count)] cached \(item.originalFilename ?? item.localIdentifier)")
+                    md5 = m.lowercased()
+                    cacheHits += 1
+                    entries[i]["md5"] = m.lowercased()
+                    entries[i]["sha256"] = cached.sha256 ?? NSNull()
+                    entries[i]["byteCount"] = cached.byteCount ?? NSNull()
+                    entries[i]["md5Source"] = "cache"
+                } else {
+                    CLI.log("[\(i + 1)/\(items.count)] hashing \(item.originalFilename ?? item.localIdentifier)")
+                    do {
+                        let e = try await exporter.export(localIdentifier: item.localIdentifier)
+                        e.remove()
+                        md5 = e.md5Hex
+                        cache.recordHash(item: item, md5: e.md5Hex, sha256: e.sha256Hex, byteCount: e.byteCount)
+                        entries[i]["md5"] = e.md5Hex
+                        entries[i]["sha256"] = e.sha256Hex
+                        entries[i]["byteCount"] = e.byteCount
+                        entries[i]["dataSource"] = e.dataSource.rawValue
+                        entries[i]["exif"] = CLI.json(e.exif)
+                        entries[i]["md5Source"] = "export"
+                    } catch {
+                        entries[i]["hashError"] = Redactor.redact(error.localizedDescription)
+                    }
+                }
+                if let prev = cache.entry(for: item)?.lastStatus {
+                    entries[i]["cachedStatus"] = prev.rawValue
                 }
             }
             inputs.append(PlanInput(localIdentifier: item.localIdentifier, eligibility: item.eligibility, md5: md5))
         }
+        report["md5FromCacheCount"] = cacheHits
         if let remote {
             let decisions = UploadPlanner.plan(inputs, remote: remote)
             var counts: [String: Int] = [:]
+            var updates: [ResultCache.StatusUpdate] = []
             for (i, d) in decisions.enumerated() {
                 entries[i]["plan"] = CLI.json(d)
                 counts[d.label, default: 0] += 1
+                // 状態は Drive の一覧と照合したときだけ書き戻す（--remote-md5-file は不完全なことがある）
+                guard let driveFolderId else { continue }
+                switch d {
+                case .duplicateRemote(let fid, _):
+                    updates.append(.init(item: items[i], status: .duplicateRemote, driveFileId: fid.isEmpty ? nil : fid,
+                                         folderId: driveFolderId))
+                case .toUpload, .duplicateInBatch:
+                    updates.append(.init(item: items[i], status: .checkedNotOnDrive, driveFileId: nil, folderId: driveFolderId))
+                case .ineligible, .notHashed: break
+                }
             }
+            cache.recordStatuses(updates)
             report["planCounts"] = counts
         }
         report["items"] = entries

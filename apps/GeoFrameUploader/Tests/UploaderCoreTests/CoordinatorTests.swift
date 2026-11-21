@@ -46,8 +46,14 @@ final class RecordStoreTests: XCTestCase {
 final class FakeExporter: OriginalExporting, @unchecked Sendable {
     let dir: URL
     let contents: [String: Data]
+    private let lock = NSLock()
+    private var _calls: [String] = []
+    /// export が呼ばれた localIdentifier（順）
+    var calls: [String] { lock.withLock { _calls } }
     init(dir: URL, contents: [String: Data]) { self.dir = dir; self.contents = contents }
+    private func note(_ id: String) { lock.withLock { _calls.append(id) } }
     func export(localIdentifier: String) async throws -> ExportedOriginal {
+        note(localIdentifier)
         guard let d = contents[localIdentifier] else { throw ExportError.assetNotFound(localIdentifier) }
         let u = dir.appendingPathComponent(UUID().uuidString)
         try d.write(to: u)

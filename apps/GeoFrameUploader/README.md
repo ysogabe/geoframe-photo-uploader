@@ -27,8 +27,9 @@ apps/GeoFrameUploader/
     UploadPlanner.swift         重複判定（純粋関数）/ --remote-md5-file の読み込み
     UploadCoordinator.swift     逐次アップロード・検証・イベント通知
     RecordStore.swift           records.jsonl（0600）
+    ResultCache.swift           item-cache.json（写真ごとの MD5 と前回の結果、0600）
     UploaderService.swift       UI と CLI が共有する窓口（actor）
-    DuplicatePrecheck.swift     送信前の重複確認（書き出し + MD5 + 照合のみ、送信しない）
+    DuplicatePrecheck.swift     送信前の重複確認（MD5 はキャッシュ優先、照合のみ、送信しない）
     HTTPSupport.swift           伏字化（トークン類の除去）・フォームエンコード
   Sources/GeoFrameUploader/     実行ファイル（--cli なら CLI、無ければ SwiftUI）
     AppModel.swift              @MainActor の状態管理（UploaderService を保持）
@@ -39,14 +40,18 @@ apps/GeoFrameUploader/
   scripts/cli.sh                .app 経由で CLI を実行
 ```
 
-UI を実装するときは `UploaderService` を使います。`status()`、`loadItems(fromDay:toDay:)`、`signIn()`、`resolveFolderId()`、`remoteIndex()`、`upload(items:maxItemsPerRun:onEvent:)`、`uploadStream(...)`、`precheckDuplicates(items:onProgress:)`、`thumbnail(...)` が用意されています。`onEvent` は任意のスレッドから呼ばれるので、UI 側で MainActor に移してください。
+UI を実装するときは `UploaderService` を使います。`status()`、`loadItems(fromDay:toDay:)`、`signIn()`、`resolveFolderId()`、`remoteIndex()`、`upload(items:maxItemsPerRun:onEvent:)`、`uploadStream(...)`、`precheckDuplicates(items:onProgress:)`、`cachedEntries(for:)`、`resultCache()`、`thumbnail(...)` が用意されています。`onEvent` は任意のスレッドから呼ばれるので、UI 側で MainActor に移してください。
 
 ## UI
 
 1. **ヘッダー**: 写真ライブラリの許可状態（未確認 / 許可済み / 拒否 / 限定）。フルアクセスでなければ許可ボタン、拒否・限定ならシステム設定（プライバシー > 写真）を開くボタンを出します。Google は oauth-client.json 未配置（置き場所と `docs/google-cloud-setup.md` を案内）/ 未接続（「Google に接続」、接続中はキャンセル可）/ 接続済み（「ログアウト」と送信先フォルダ名・ID）を表示します。状態はアプリがアクティブになるたびに再確認します（ダイアログは出しません）。
-2. **日付指定**: 単日 / 期間を選び「読み込む」（⌘R）。全 N 件 / 対象 M 件 / 対象外 K 件を表示します。
+2. **日付指定**: 単日 / 期間を選び「読み込む」（⌘R）。全 N 件 / 対象 M 件 / 対象外 K 件 / 前回送信済み n 件を表示します。
 3. **グリッド**: サムネイル、ファイル名、撮影時刻（HH:mm）、形式、お気に入り・バースト・Live・位置情報の印。対象外は薄く表示し、理由を出して選択できません。クリックまたはチェックで選択、「すべて選択」「選択解除」。
-4. **重複を確認**（任意）: 選択した写真の原本 MD5 を計算して Drive と照合するだけで、送信はしません。結果は目安で、送信時にも改めて照合します。
+   - 読み込んだ直後に、`item-cache.json` に残っている前回までの結果を通信せずに表示します: 「送信済み」（ツールチップに日時と fileId）/「重複（Drive に既存）」/「確認済み・未送信」/「前回失敗」。現在の送信先フォルダについての結果だけを出します。
+   - 「すべて選択」は、送信済み・重複（Drive に既存）とみなせる写真を選びません。手動では選べます（送信時に Drive にまだあれば重複としてスキップされます）。
+   - 「送信済み・重複を隠す」（既定オフ）で、それらを一覧から隠します。
+   - 前回送信済みなのに、重複確認や送信で取り直した Drive 一覧に見当たらないときは「前回送信済みだが Drive に見当たらない」と表示します。
+4. **重複を確認**（任意）: 選択した写真の原本 MD5 を Drive と照合するだけで、送信はしません。キャッシュに MD5 がある写真は原本を書き出しません（iCloud からの取得を省きます）。結果は目安で、送信時にも改めて照合します。
 5. **送信**: 選択が 20 件を超えると件数を示す確認ダイアログを出し、承認後にだけ送ります（`maxItemsPerRun` = 選択件数）。送信は 1 件ずつで、全体の進捗（i/N）と各セルの段階（原本を取得中 / 重複を確認中 / 送信中 xx% / 検証中）を表示します。「中止」（Esc）で止められます。
 6. **結果**: セルごとに 送信済み / 重複でスキップ（ツールチップに Drive fileId か先行写真）/ 対象外 / 失敗（エラー文）/ 中止。実行後は件数のまとめ、失敗一覧、records.jsonl の場所と「Finder で表示」を出します。実行後は再送を防ぐため選択を解除します。
 7. エラーはウィンドウ上部のバナーで表示します（モーダルにしません）。
@@ -77,6 +82,17 @@ scripts/build-app.sh       # .build/GeoFrameUploader.app を作って署名
 | `oauth-client.json` | Google Cloud Console でダウンロードした「デスクトップ アプリ」用 OAuth クライアント JSON（`{"installed":{...}}`）。**git に入れないこと** |
 | `config.json` | `{"folderId": "...", "folderName": "GeoFrame"}`。`folderId` を省略すると、マイドライブ直下の `folderName` を検索して保存します。0 件や複数件のときは推測せずエラーにします |
 | `records.jsonl` | 送信記録。1 実行・1 写真ごとに 1 行の JSON です（0600） |
+| `item-cache.json` | 写真ごとの原本 MD5 / SHA-256 / バイト数と前回の結果（`sent` / `duplicateRemote` / `checkedNotOnDrive` / `failed`、Drive fileId、フォルダ ID、日時）。キーは `localIdentifier`（0600、アトミック書き込み） |
+
+### item-cache.json（結果キャッシュ）
+
+- 目的: 一度 MD5 を計算した写真は、重複確認・送信・`scan --hash` で原本を書き出し直さないようにします。また、前回の結果を読み込み直後に表示します。
+- 重複判定の正は常に、その都度取り直す Drive の一覧です。キャッシュの MD5 が一覧にあれば書き出さずに重複としてスキップします。一覧に無ければ（前回送信済みでも、Drive から消されていれば）通常どおり書き出して送ります。書き出した MD5 がキャッシュと違えば上書きします。
+- 原本ファイル名か UTI が今の写真と違うエントリは無視して上書きします。
+- `records.jsonl` の取り込み: 初回は全件、以後は読み込み時・「読み込む」の後・重複確認 / 送信 / `scan` の開始時に、前回の続き（`recordsImportedThrough`: バイト位置 + ファイルの inode / デバイス + 直前の末尾の MD5）から追記分だけを取り込みます。ファイルが縮んだ・置き換わったときは先頭から取り込み直します。変換は 検証済みの `sent` → `sent`、`skipped_duplicate` → `duplicateRemote`、md5 付きの失敗 → md5 と `failed` です。中止は失敗として扱わず、md5 の無い記録で md5 を消しません。自分で送ったファイルが後で重複として見つかっても `sent` のままです。エントリより新しい記録だけを適用するので、取り込み直しても結果は変わりません。
+- 保存は、直前にディスク上の内容を読み直してエントリ単位でマージします（更新日時の新しい方が勝つ）。アプリと CLI が同時に動いても互いのエントリを消しにくくしていますが、ロックはしていないので完全ではありません。
+- 読めないファイルは `item-cache.json.corrupt-<日時>` に退避し、`records.jsonl` から作り直します。
+- **リセット**: アプリを終了して `item-cache.json` を削除してください。次回起動時に `records.jsonl` から作り直します（前回の結果を何も使いたくないときは `records.jsonl` も別の場所へ移します）。
 
 - リフレッシュトークンは Keychain だけに保存します（サービス `dev.local.geoframe.uploader`、アカウント `google-refresh-token`、ThisDeviceOnly）。
 - アクセストークンはメモリ上にだけ保持します。
@@ -90,7 +106,7 @@ scripts/build-app.sh       # .build/GeoFrameUploader.app を作って署名
 
 ```sh
 scripts/cli.sh status
-scripts/cli.sh scan --from 2026-11-01 [--to 2026-11-02] [--hash] [--remote-md5-file path.json]
+scripts/cli.sh scan --from 2026-11-01 [--to 2026-11-02] [--hash [--no-cache]] [--remote-md5-file path.json]
 scripts/cli.sh auth
 scripts/cli.sh upload --from 2026-11-01 [--to ...] (--ids ID1,ID2 | --limit N) [--max N]
 scripts/cli.sh signout
@@ -98,9 +114,9 @@ scripts/cli.sh signout
 
 各サブコマンドの動作:
 
-- `status`: 写真ライブラリの許可状態、oauth-client.json の有無と妥当性、Keychain のトークンの有無（中身は読みません）、config を表示します。ダイアログは一切出しません。
+- `status`: 写真ライブラリの許可状態、oauth-client.json の有無と妥当性、Keychain のトークンの有無（中身は読みません）、config、item-cache.json の場所とエントリ数（`itemCacheEntryCount`）を表示します。ダイアログは一切出しません。
 - `scan`: 期間内（ローカル時刻の暦日、`--to` 省略時は 1 日だけ）のアセットを、対象/対象外とその理由つきで一覧にします。
-  - `--hash` を付けると、対象の原本を書き出して MD5 / SHA-256 を計算します（一時ファイルはすぐ削除）。
+  - `--hash` を付けると、対象の原本を書き出して MD5 / SHA-256 を計算します（一時ファイルはすぐ削除）。item-cache.json に MD5 があれば書き出さずにそれを使い、各アイテムの `md5Source`（`cache` / `export`）で区別します。`--no-cache` で常に書き出します。計算したハッシュはキャッシュに書き戻し、Drive の一覧と照合したときは結果も書き戻します。
   - `--remote-md5-file`（md5 文字列の配列、または `rclone lsjson --hash` の出力）を渡すか Drive にサインイン済みのときは、重複判定（`plan`）も付けます。
   - アップロードは決してしません。初回実行時は写真ライブラリの許可ダイアログが出ます。
 - `auth`: ブラウザで Google にサインインし、付与されたスコープを表示します（トークンは表示しません）。

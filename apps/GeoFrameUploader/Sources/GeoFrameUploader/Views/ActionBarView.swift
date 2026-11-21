@@ -13,6 +13,9 @@ struct ActionBarView: View {
             Text("選択 \(model.selection.count) 件")
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+            Toggle("送信済み・重複を隠す", isOn: $model.hideDone)
+                .toggleStyle(.checkbox)
+                .help("前回までに送信済み、または Drive に同じ内容があると分かっている写真を一覧から隠します")
 
             Spacer()
 

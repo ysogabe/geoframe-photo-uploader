@@ -10,6 +10,9 @@ struct PhotoCell: View {
     let live: LivePhase?
     let result: ItemResult?
     let precheck: PrecheckResult?
+    /// 前回までの結果（item-cache.json。現在のフォルダについてのものだけ）
+    let cached: CacheEntry?
+    let cacheWarning: String?
     let duplicateNote: String?
     let thumbnails: ThumbnailCache
     let onToggle: () -> Void
@@ -40,6 +43,13 @@ struct PhotoCell: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .help(reason)
+            }
+            if let cacheWarning {
+                Text(cacheWarning)
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .help(cacheWarning)
             }
             if let r = result, r.status == .failed, !r.wasCancelled, let err = r.error {
                 Text(err)
@@ -114,6 +124,8 @@ struct PhotoCell: View {
             ResultBadge(result: result, duplicateNote: duplicateNote).padding(6)
         } else if let precheck {
             PrecheckBadge(precheck: precheck, duplicateNote: duplicateNote).padding(6)
+        } else if let cached, cached.lastStatus != nil {
+            CachedStatusBadge(entry: cached).padding(6)
         }
     }
 
@@ -247,6 +259,40 @@ struct ResultBadge: View {
                 StatusBadge(text: "失敗", systemImage: "xmark.octagon.fill", color: .red)
                     .help(result.error ?? "失敗")
             }
+        }
+    }
+}
+
+/// 前回までの結果（item-cache.json。通信せずに表示する）。
+struct CachedStatusBadge: View {
+    let entry: CacheEntry
+
+    private static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd HH:mm"
+        return f
+    }()
+
+    private var when: String { entry.statusAt.map { Self.dateFormatter.string(from: $0) } ?? "日時不明" }
+
+    var body: some View {
+        switch entry.lastStatus {
+        case .sent?:
+            StatusBadge(text: "送信済み", systemImage: "checkmark.seal", color: .green)
+                .help("前回送信: \(when)（Drive fileId: \(entry.driveFileId ?? "-")）")
+        case .duplicateRemote?:
+            StatusBadge(text: "重複（Drive に既存）", systemImage: "equal.circle", color: .gray)
+                .help("前回の確認（\(when)）で Drive に同じ内容のファイルがありました"
+                      + (entry.driveFileId.map { "（fileId: \($0)）" } ?? ""))
+        case .checkedNotOnDrive?:
+            StatusBadge(text: "確認済み・未送信", systemImage: "checkmark.circle", color: .teal)
+                .help("前回の確認（\(when)）では Drive にありませんでした")
+        case .failed?:
+            StatusBadge(text: "前回失敗", systemImage: "exclamationmark.triangle.fill", color: .orange)
+                .help("前回（\(when)）の送信に失敗しました" + (entry.driveFileId.map { "（fileId: \($0)）" } ?? ""))
+        case nil:
+            EmptyView()
         }
     }
 }

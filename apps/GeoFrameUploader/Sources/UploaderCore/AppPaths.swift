@@ -21,6 +21,8 @@ public struct AppPaths: Sendable {
     public var configFile: URL { baseDir.appendingPathComponent("config.json") }
     /// 送信記録（JSON Lines、0600）
     public var recordsFile: URL { baseDir.appendingPathComponent("records.jsonl") }
+    /// 写真ごとの MD5 と前回の結果（JSON、0600）。消すと次回 records.jsonl から作り直す
+    public var itemCacheFile: URL { baseDir.appendingPathComponent("item-cache.json") }
 
     /// ベースディレクトリを 0700 で作成（既存なら権限を 0700 に揃える）。
     public func ensureBaseDir() throws {

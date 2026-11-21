@@ -65,6 +65,18 @@ final class AppModel: ObservableObject {
     @Published private(set) var hasLoaded = false
     @Published private(set) var isLoading = false
     @Published private(set) var selection: Set<String> = []
+    /// 読み込み時点の item-cache.json（前回までの結果）。読み込み直すまで固定する
+    @Published private(set) var cachedEntries: [String: CacheEntry] = [:]
+    /// 「送信済み・重複を隠す」
+    @Published var hideDone = false {
+        didSet { if hideDone { pruneHiddenSelection() } }
+    }
+
+    /// 隠れている（送信済み・重複とみなせる）写真を選択から外す。
+    private func pruneHiddenSelection() {
+        let hidden = Set(items.filter { isDone($0) }.map(\.id))
+        if !hidden.isDisjoint(with: selection) { selection.subtract(hidden) }
+    }
 
     // 実行
     @Published private(set) var livePhases: [String: LivePhase] = [:]
@@ -107,6 +119,49 @@ final class AppModel: ObservableObject {
     var eligibleCount: Int { items.filter { $0.eligibility.isEligible }.count }
     var ineligibleCount: Int { items.count - eligibleCount }
     var selectedItems: [PhotoItem] { items.filter { selection.contains($0.id) } }
+    var visibleItems: [PhotoItem] { hideDone ? items.filter { !isDone($0) } : items }
+    var hiddenCount: Int { items.count - visibleItems.count }
+    var previouslySentCount: Int { items.filter { cachedStatus(for: $0)?.lastStatus == .sent }.count }
+
+    /// 現在の送信先フォルダについての前回の結果（無ければ nil）。
+    func cachedStatus(for item: PhotoItem) -> CacheEntry? {
+        guard let e = cachedEntries[item.id], e.lastStatus != nil,
+              e.statusApplies(toFolder: folderId ?? status?.config.folderId) else { return nil }
+        return e
+    }
+
+    /// Drive に載っている（送信済み・重複）とみなせるか。今回の結果 → 重複確認 → 前回の結果の順に見る。
+    /// 「送信済み・重複を隠す」と「すべて選択」の両方で使う。
+    func isDone(_ item: PhotoItem) -> Bool {
+        if let r = results[item.id] { return r.status == .sent || r.status == .skippedDuplicate }
+        if let p = prechecks[item.id] {
+            if case .duplicateRemote = p.decision { return true }
+            if p.decision != .notHashed { return false }
+        }
+        switch cachedStatus(for: item)?.lastStatus {
+        case .sent?, .duplicateRemote?: return true
+        default: return false
+        }
+    }
+
+    /// 前回送信済みなのに、今回取り直した Drive 一覧に見当たらなかったときの注意書き。
+    func cacheWarning(for item: PhotoItem) -> String? {
+        guard cachedStatus(for: item)?.lastStatus == .sent else { return nil }
+        if let r = results[item.id] {
+            switch r.status {
+            case .sent: return "前回送信済みだが Drive に見当たらないため再送しました"
+            case .failed where !r.wasCancelled && r.md5 != nil: return "前回送信済みだが Drive に見当たらない"
+            default: return nil
+            }
+        }
+        if let p = prechecks[item.id] {
+            switch p.decision {
+            case .toUpload, .duplicateInBatch: return "前回送信済みだが Drive に見当たらない"
+            default: return nil
+            }
+        }
+        return nil
+    }
     var canSend: Bool { !isBusy && !selection.isEmpty && googleReady && photosAuthorized && !isSigningIn }
     var canPrecheck: Bool { canSend }
     var recordsFile: String? { status?.recordsFile }
@@ -248,6 +303,7 @@ final class AppModel: ObservableObject {
             defer { isLoading = false }
             do {
                 let loaded = try await service.loadItems(start: range.start, end: range.end)
+                cachedEntries = await service.cachedEntries(for: loaded)
                 items = loaded
                 hasLoaded = true
                 selection = []
@@ -274,7 +330,8 @@ final class AppModel: ObservableObject {
 
     func selectAll() {
         guard !isBusy else { return }
-        selection = Set(items.filter { $0.eligibility.isEligible }.map(\.id))
+        // 送信済み・重複（Drive に既存）とみなせるものは選ばない（手動では選べる）
+        selection = Set(visibleItems.filter { $0.eligibility.isEligible && !isDone($0) }.map(\.id))
     }
 
     func deselectAll() {
@@ -299,6 +356,7 @@ final class AppModel: ObservableObject {
                     Task { @MainActor in self.updatePrecheckProgress(done: done, total: total) }
                 }
                 for x in r { self.prechecks[x.localIdentifier] = x }
+                if self.hideDone { self.pruneHiddenSelection() }
                 let toUpload = r.filter { $0.decision == .toUpload }.count
                 let dup = r.filter {
                     switch $0.decision {

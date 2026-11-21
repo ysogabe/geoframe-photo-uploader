@@ -11,10 +11,13 @@ struct PhotoGridView: View {
         Group {
             if model.items.isEmpty {
                 emptyState
+            } else if model.visibleItems.isEmpty {
+                ContentUnavailableView("すべて非表示です", systemImage: "eye.slash",
+                                       description: Text("送信済み・重複の \(model.hiddenCount) 件を隠しています。"))
             } else {
                 ScrollView {
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
-                        ForEach(model.items) { item in
+                        ForEach(model.visibleItems) { item in
                             PhotoCell(
                                 item: item,
                                 isSelected: model.selection.contains(item.id),
@@ -22,6 +25,8 @@ struct PhotoGridView: View {
                                 live: model.livePhases[item.id],
                                 result: model.results[item.id],
                                 precheck: model.prechecks[item.id],
+                                cached: model.cachedStatus(for: item),
+                                cacheWarning: model.cacheWarning(for: item),
                                 duplicateNote: duplicateNote(for: item),
                                 thumbnails: model.thumbnails,
                                 onToggle: { model.toggle(item) }
