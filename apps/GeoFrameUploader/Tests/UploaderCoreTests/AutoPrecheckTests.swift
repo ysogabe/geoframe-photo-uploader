@@ -161,6 +161,22 @@ final class AutoPrecheckCheckOneTests: XCTestCase {
         XCTAssertEqual(fresh.decision, .toUpload)
     }
 
+    func testPicksUpHashWrittenByAnotherProcessBeforeChecking() async throws {
+        let existing = Data("existing".utf8)
+        let url = dir.appendingPathComponent("item-cache.json")
+        let appCache = ResultCache(fileURL: url)   // アプリが起動時に開いたまま
+        let cli = ResultCache(fileURL: url)
+        cli.recordStatus(item: item("A"), status: .sent, driveFileId: "OLD", folderId: "F", md5: md5(existing))
+        let exporter = FakeExporter(dir: dir, contents: ["A": existing])
+        let remote = RemoteIndex(files: [DriveFile(id: "OLD", name: "A.HEIC", md5Checksum: md5(existing))])
+        let r = try await DuplicatePrecheck.checkOne(item: item("A"), priorSelected: [], exporter: exporter, remote: remote,
+                                                     cache: appCache, folderId: "F")
+        XCTAssertTrue(r.md5FromCache)   // CLI が書いた md5 を取り込んでから確認する（書き出さない）
+        XCTAssertEqual(exporter.calls, [])
+        XCTAssertEqual(r.decision, .duplicateRemote(fileId: "OLD", name: "A.HEIC"))
+        XCTAssertEqual(appCache.entry(for: item("A"))?.lastStatus, .sent)   // 自分で送ったものは sent のまま
+    }
+
     func testExportFailureIsNotHashed() async throws {
         let r = try await DuplicatePrecheck.checkOne(item: item("X"), priorSelected: [],
                                                      exporter: FakeExporter(dir: dir, contents: [:]), remote: RemoteIndex())

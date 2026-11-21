@@ -325,6 +325,88 @@ final class ResumableUploadTests: XCTestCase {
         }
     }
 
+    func testProgressNeverGoesBackwardsAfterResync() async throws {
+        // 2 チャンク目で 503。サーバーは 1 チャンク目の後半も失っていた（照会の Range が手前に戻る）
+        let n = chunk * 3
+        let (url, data) = makeFile(bytes: n, in: dir)
+        let server = FakeResumableServer(total: n)
+        var failed = false
+        server.intercept = { cr, _ in
+            if !failed && cr.hasPrefix("bytes \(self.chunk)-") {
+                failed = true
+                server.received = server.received.prefix(self.chunk / 2)
+                return .http(503, [:], Data())
+            }
+            return nil
+        }
+        StubProtocol.setHandler(server.handle)
+        let progress = ProgressBox()
+        let f = try await makeDrive().uploadResumable(fileURL: url, name: "IMG_1.HEIC", mimeType: "image/heic", folderId: "FOLDER",
+                                                      byteCount: Int64(n), expectedMD5: md5(data),
+                                                      progress: { s, t in progress.add(s, t) })
+        XCTAssertEqual(f.id, "NEWID")
+        XCTAssertEqual(server.received, data)
+        XCTAssertTrue(server.contentRanges.contains("bytes \(chunk / 2)-\(chunk / 2 + chunk - 1)/\(n)"))
+        let sent = progress.all.map(\.0)
+        XCTAssertEqual(sent.first, 0)
+        XCTAssertEqual(sent.last, Int64(n))
+        XCTAssertEqual(sent, sent.sorted(), "progress must not go backwards: \(sent)")
+        XCTAssertEqual(Set(sent).count, sent.count, "no duplicate reports: \(sent)")
+    }
+
+    func testSessionRestartResetsProgressToZero() async throws {
+        let n = chunk * 2
+        let (url, data) = makeFile(bytes: n, in: dir)
+        let server = FakeResumableServer(total: n)
+        var gone = false
+        server.intercept = { cr, _ in
+            if !gone && cr.hasPrefix("bytes \(self.chunk)-") { gone = true; return .http(404, [:], Data()) }
+            return nil
+        }
+        StubProtocol.setHandler(server.handle)
+        let progress = ProgressBox()
+        _ = try await makeDrive().uploadResumable(fileURL: url, name: "IMG_1.HEIC", mimeType: "image/heic", folderId: "FOLDER",
+                                                  byteCount: Int64(n), expectedMD5: md5(data),
+                                                  progress: { s, t in progress.add(s, t) })
+        // セッション再作成のときだけ 0 に戻る（戻るのは 1 回だけで、各セッションの中では増えるだけ）
+        let sent = progress.all.map(\.0)
+        let resets = sent.indices.dropFirst().filter { sent[$0] < sent[$0 - 1] }
+        XCTAssertEqual(resets.count, 1, "\(sent)")
+        XCTAssertEqual(resets.first.map { sent[$0] }, 0)
+        XCTAssertTrue(sent.contains(Int64(chunk)))
+        XCTAssertEqual(sent.first, 0)
+        XCTAssertEqual(sent.last, Int64(n))
+    }
+
+    func testProgressDelegateAndGateReportBytesWithinChunk() {
+        let progress = ProgressBox()
+        let gate = ProgressGate(total: 1000, progress: { s, t in progress.add(s, t) })
+        gate.start()
+        // 2 チャンク目（offset 400, 長さ 400）の途中経過
+        let chunkStart: Int64 = 400
+        gate.report(chunkStart)
+        let delegate = UploadProgressDelegate(onSent: { sent in gate.report(chunkStart + min(sent, 400)) })
+        let task = URLSession(configuration: .ephemeral).dataTask(with: URL(string: "https://www.googleapis.com/x")!)
+        delegate.urlSession(URLSession.shared, task: task, didSendBodyData: 100, totalBytesSent: 100, totalBytesExpectedToSend: 400)
+        delegate.urlSession(URLSession.shared, task: task, didSendBodyData: 200, totalBytesSent: 300, totalBytesExpectedToSend: 400)
+        // 再送で同じチャンクの先頭から数え直しても戻らない
+        delegate.urlSession(URLSession.shared, task: task, didSendBodyData: 50, totalBytesSent: 50, totalBytesExpectedToSend: 400)
+        delegate.urlSession(URLSession.shared, task: task, didSendBodyData: 999, totalBytesSent: 5000, totalBytesExpectedToSend: 400)
+        gate.report(2000)   // total で頭打ち
+        XCTAssertEqual(progress.all.map(\.0), [0, 400, 500, 700, 800, 1000])
+        XCTAssertTrue(progress.all.allSatisfy { $0.1 == 1000 })
+        XCTAssertEqual(gate.reported, 1000)
+    }
+
+    func testEmptyFileUsesZeroLengthPut() async throws {
+        let (url, _) = makeFile(bytes: 0, in: dir)
+        let server = FakeResumableServer(total: 0)
+        StubProtocol.setHandler(server.handle)
+        let f = try await upload(makeDrive(), url, 0, expected: nil)
+        XCTAssertEqual(f.id, "NEWID")
+        XCTAssertEqual(server.contentRanges, ["bytes */0"])
+    }
+
     func testRangeHeaderParsing() {
         XCTAssertEqual(DriveClient.nextOffset(fromRangeHeader: nil), 0)
         XCTAssertEqual(DriveClient.nextOffset(fromRangeHeader: "bytes=0-524287"), 524288)
@@ -337,4 +419,5 @@ final class ProgressBox: @unchecked Sendable {
     private var values: [(Int64, Int64)] = []
     func add(_ s: Int64, _ t: Int64) { lock.lock(); values.append((s, t)); lock.unlock() }
     var last: (Int64, Int64)? { lock.lock(); defer { lock.unlock() }; return values.last }
+    var all: [(Int64, Int64)] { lock.lock(); defer { lock.unlock() }; return values }
 }

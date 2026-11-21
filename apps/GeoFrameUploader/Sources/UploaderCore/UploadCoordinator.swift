@@ -60,6 +60,12 @@ public struct ItemResult: Codable, Sendable, Equatable {
 
     /// 中止により処理が打ち切られたアイテム（status は `.failed` のまま）。
     public var wasCancelled: Bool { status == .failed && error == UploadCoordinator.cancelledMessage }
+
+    /// アップロードは完了（応答の md5 は一致）したが、中止のため一覧での照合を終えられなかった（status は `.failed`）。
+    /// Drive にはファイルがあるので再送しない。次に一覧と照合すれば「Drive に既存」になる。
+    public var verificationInterrupted: Bool {
+        status == .failed && (error?.hasPrefix(UploadCoordinator.verifyInterruptedMessage) ?? false)
+    }
 }
 
 public struct RunSummary: Codable, Sendable {
@@ -87,8 +93,11 @@ public final class UploadCoordinator: @unchecked Sendable {
     public struct Options: Sendable {
         public var verifyAttempts: Int
         public var verifyDelay: TimeInterval
-        public init(verifyAttempts: Int = 5, verifyDelay: TimeInterval = 2) {
+        /// アップロード完了後に中止されたとき、一覧での照合を続ける上限（秒。中止された時点から数える）
+        public var verifyBudgetAfterCancel: TimeInterval
+        public init(verifyAttempts: Int = 5, verifyDelay: TimeInterval = 2, verifyBudgetAfterCancel: TimeInterval = 10) {
             self.verifyAttempts = verifyAttempts; self.verifyDelay = verifyDelay
+            self.verifyBudgetAfterCancel = verifyBudgetAfterCancel
         }
     }
 
@@ -152,12 +161,13 @@ public final class UploadCoordinator: @unchecked Sendable {
             updateCache(item: item, result: result, remote: remote, folderId: folderId)
             results.append(result)
             emit(.finished(result), nil)
-            if result.error == Self.cancelledMessage { cancelled = true; break }
+            if result.error == Self.cancelledMessage || result.verificationInterrupted { cancelled = true; break }
         }
         return RunSummary(runId: runId, folderId: folderId, remoteFileCount: remoteCount, results: results, cancelled: cancelled)
     }
 
     public static let cancelledMessage = "キャンセルされました"
+    public static let verifyInterruptedMessage = "アップロード済み（応答の md5 は一致）・中止のため一覧での照合は未完了"
 
     /// 1 件の結果を item-cache.json に反映する（中止は失敗として残さない）。
     private func updateCache(item: PhotoItem, result r: ItemResult, remote: RemoteIndex, folderId: String) {
@@ -176,6 +186,11 @@ public final class UploadCoordinator: @unchecked Sendable {
             } else if let m = freshHash {
                 cache.recordHash(item: item, md5: m, sha256: r.sha256, byteCount: r.byteCount)
             }
+        case .failed where r.driveFileId != nil:
+            // Drive にファイルがある失敗（未検証・md5 不一致・中止で照合未完了）は、中止中でも状態と md5 を残す。
+            // records.jsonl の同じ行を取り込んだ結果（failed + fileId + md5）と一致させる
+            cache.recordStatus(item: item, status: .failed, driveFileId: r.driveFileId, folderId: folderId,
+                               md5: freshHash, sha256: r.sha256, byteCount: r.byteCount)
         case .sent, .failed:
             if r.wasCancelled || Task.isCancelled {
                 if let m = freshHash { cache.recordHash(item: item, md5: m, sha256: r.sha256, byteCount: r.byteCount) }
@@ -263,30 +278,89 @@ public final class UploadCoordinator: @unchecked Sendable {
         inBatch[exp.md5Hex] = item.localIdentifier
 
         emit(.verifying, nil)
-        // (b) 新しい一覧で fileId と md5 を確認（結果整合性のため数回リトライ）
-        var lastProblem = "一覧に fileId が見つかりません"
-        for attempt in 1...max(1, options.verifyAttempts) {
-            do {
-                let listed = try await drive.findFiles(named: item.driveName, inFolder: folderId)
-                if let f = listed.first(where: { $0.id == uploaded.id }) {
-                    if f.md5Checksum?.lowercased() == exp.md5Hex.lowercased() {
-                        r.verified = true
-                        break
-                    }
-                    lastProblem = "一覧上の md5 が不一致（\(f.md5Checksum ?? "なし")）"
-                }
-            } catch {
-                lastProblem = "検証用一覧の取得に失敗: \(Redactor.redact(error.localizedDescription))"
-            }
-            if attempt < options.verifyAttempts { try? await sleep(options.verifyDelay) }
-        }
-        if r.verified {
+        // (b) 新しい一覧で fileId と md5 を確認（結果整合性のため数回リトライ）。
+        // アップロードは済んでいるので、ここで中止されても照合は続ける（中止から verifyBudgetAfterCancel 秒まで）
+        let v = await verifyShielded(name: item.driveName, folderId: folderId, fileId: uploaded.id, md5: exp.md5Hex)
+        if v.verified {
+            r.verified = true
             r.status = .sent
             remote.insert(DriveFile(id: uploaded.id, name: uploaded.name, md5Checksum: exp.md5Hex))
+        } else if v.interrupted {
+            r.status = .failed
+            r.error = "\(Self.verifyInterruptedMessage)（fileId=\(uploaded.id)）。再送せず、次回の重複確認で Drive 上の有無を確認してください"
         } else {
             r.status = .failed
-            r.error = "アップロード済みだが検証に失敗（fileId=\(uploaded.id)）: \(lastProblem)。再送せず手動確認してください"
+            r.error = "アップロード済みだが検証に失敗（fileId=\(uploaded.id)）: \(v.lastProblem)。再送せず手動確認してください"
         }
         return (r, exp)
+    }
+
+    private struct VerifyOutcome: Sendable {
+        var verified: Bool
+        /// 中止され、上限時間内に照合を終えられなかった
+        var interrupted: Bool
+        var lastProblem: String
+    }
+
+    /// 一覧での照合を、呼び出し元の中止から切り離して実行する。中止されたら `verifyBudgetAfterCancel` 秒後に打ち切る。
+    private func verifyShielded(name: String, folderId: String, fileId: String, md5: String) async -> VerifyOutcome {
+        let drive = self.drive, sleep = self.sleep, options = self.options
+        // Task {} は呼び出し元の中止を引き継がない
+        let worker = Task { () -> VerifyOutcome in
+            var lastProblem = "一覧に fileId が見つかりません"
+            let attempts = max(1, options.verifyAttempts)
+            for attempt in 1...attempts {
+                if Task.isCancelled { return VerifyOutcome(verified: false, interrupted: true, lastProblem: lastProblem) }
+                do {
+                    let listed = try await drive.findFiles(named: name, inFolder: folderId)
+                    if let f = listed.first(where: { $0.id == fileId }) {
+                        if f.md5Checksum?.lowercased() == md5.lowercased() {
+                            return VerifyOutcome(verified: true, interrupted: false, lastProblem: "")
+                        }
+                        lastProblem = "一覧上の md5 が不一致（\(f.md5Checksum ?? "なし")）"
+                    }
+                } catch {
+                    if Task.isCancelled { return VerifyOutcome(verified: false, interrupted: true, lastProblem: lastProblem) }
+                    lastProblem = "検証用一覧の取得に失敗: \(Redactor.redact(error.localizedDescription))"
+                }
+                if attempt < attempts { try? await sleep(options.verifyDelay) }
+            }
+            return VerifyOutcome(verified: false, interrupted: Task.isCancelled, lastProblem: lastProblem)
+        }
+        let budget = options.verifyBudgetAfterCancel
+        let timer = TimerBox()
+        return await withTaskCancellationHandler {
+            let out = await worker.value
+            timer.cancel()
+            return out
+        } onCancel: {
+            log("cancelled during verification; continuing for up to \(budget)s")
+            timer.start(after: budget) { worker.cancel() }
+        }
+    }
+}
+
+/// 中止後の照合の打ち切りタイマー（照合が先に終わったら止める）。
+private final class TimerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<Void, Never>?
+    private var finished = false
+
+    func start(after seconds: TimeInterval, _ fire: @escaping @Sendable () -> Void) {
+        lock.withLock {
+            guard !finished, task == nil else { return }
+            task = Task {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                if !Task.isCancelled { fire() }
+            }
+        }
+    }
+
+    func cancel() {
+        lock.withLock {
+            finished = true
+            task?.cancel()
+            task = nil
+        }
     }
 }

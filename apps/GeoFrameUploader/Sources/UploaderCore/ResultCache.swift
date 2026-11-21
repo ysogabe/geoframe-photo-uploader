@@ -145,6 +145,8 @@ public final class ResultCache: @unchecked Sendable {
     /// 書き出して計算したハッシュを記録する。MD5 が変わっていれば状態も消す（別の内容とみなす）。
     public func recordHash(item: PhotoItem, md5: String, sha256: String?, byteCount: Int64?, at date: Date = Date()) {
         lock.withLock {
+            // 他のプロセスが書いた状態を先に取り込んでから更新する（古いメモリで上書きしない）
+            mergeFromDiskLocked()
             var e = validOrFresh(item)
             if let old = e.md5, old.lowercased() != md5.lowercased() {
                 e.lastStatus = nil; e.driveFileId = nil; e.statusAt = nil; e.folderId = nil
@@ -159,6 +161,7 @@ public final class ResultCache: @unchecked Sendable {
     public func recordStatus(item: PhotoItem, status: CachedStatus, driveFileId: String?, folderId: String?,
                              md5: String? = nil, sha256: String? = nil, byteCount: Int64? = nil, at date: Date = Date()) {
         lock.withLock {
+            mergeFromDiskLocked()
             applyStatus(item: item, status: status, driveFileId: driveFileId, folderId: folderId,
                         md5: md5, sha256: sha256, byteCount: byteCount, at: date)
             saveLocked()
@@ -179,6 +182,7 @@ public final class ResultCache: @unchecked Sendable {
     public func recordStatuses(_ updates: [StatusUpdate], at date: Date = Date()) {
         guard !updates.isEmpty else { return }
         lock.withLock {
+            mergeFromDiskLocked()
             for u in updates {
                 applyStatus(item: u.item, status: u.status, driveFileId: u.driveFileId, folderId: u.folderId,
                             md5: nil, sha256: nil, byteCount: nil, at: date)
@@ -220,20 +224,19 @@ public final class ResultCache: @unchecked Sendable {
         return driveFileId == nil || driveFileId == e.driveFileId
     }
 
-    /// ディスク上の内容とエントリ単位でマージする（新しい方が勝つ。同時刻ならメモリ側）。変化があれば真。
+    /// ディスク上の内容とフィールド単位でマージする（ハッシュは hashedAt、状態は statusAt の新しい方。同時刻ならメモリ側）。
+    /// 変化があれば真。
     @discardableResult
     private func mergeFromDiskLocked() -> Bool {
         guard let data = try? Data(contentsOf: fileURL),
               let disk = try? Self.decoder.decode(FileFormat.self, from: data) else { return false }
         var changed = false
         for (id, d) in disk.entries {
-            if let m = entries[id] {
-                if (d.latest ?? .distantPast) > (m.latest ?? .distantPast) { entries[id] = d; changed = true }
-            } else {
-                entries[id] = d; changed = true
-            }
+            let merged = entries[id].map { Self.merge(memory: $0, disk: d) } ?? d
+            if entries[id] != merged { entries[id] = merged; changed = true }
         }
-        // 相手の方が先まで取り込んでいれば（そのエントリはマージ済み）その位置を使う
+        // 相手の方が先まで取り込んでいればその位置を使う。相手の取り込み結果（エントリ）は上で漏れなくマージ済み
+        // （フィールドごとに新しい方を残すので、相手が records.jsonl から反映した状態をこちらが捨てることはない）
         if let dw = disk.recordsImportedThrough {
             if let w = watermark {
                 if dw.fileNumber == w.fileNumber, dw.deviceNumber == w.deviceNumber, dw.byteOffset > w.byteOffset {
@@ -245,6 +248,30 @@ public final class ResultCache: @unchecked Sendable {
         }
         if disk.recordsImportedThrough != watermark { changed = true }
         return changed
+    }
+
+    /// 2 つのエントリをフィールド単位でマージする。
+    /// - 原本ファイル名・UTI が違う（別の写真についての記録）ときはエントリ単位で新しい方。
+    /// - ハッシュ（md5 / sha256 / byteCount / hashedAt）は hashedAt の新しい方。
+    /// - 状態（lastStatus / driveFileId / statusAt / folderId）は statusAt の新しい方。
+    /// - 同時刻ならメモリ側。勝った状態が、勝ったハッシュとは別の md5 の側のものなら、状態は別の内容についてなので捨てる。
+    static func merge(memory m: CacheEntry, disk d: CacheEntry) -> CacheEntry {
+        guard m.originalFilename == d.originalFilename, m.uti == d.uti else {
+            return (d.latest ?? .distantPast) > (m.latest ?? .distantPast) ? d : m
+        }
+        var out = m
+        if (d.hashedAt ?? .distantPast) > (m.hashedAt ?? .distantPast) {
+            out.md5 = d.md5; out.sha256 = d.sha256; out.byteCount = d.byteCount; out.hashedAt = d.hashedAt
+        }
+        let statusFromDisk = (d.statusAt ?? .distantPast) > (m.statusAt ?? .distantPast)
+        let statusSide = statusFromDisk ? d : m
+        if statusFromDisk {
+            out.lastStatus = d.lastStatus; out.driveFileId = d.driveFileId; out.statusAt = d.statusAt; out.folderId = d.folderId
+        }
+        if out.lastStatus != nil, let sm = statusSide.md5?.lowercased(), let hm = out.md5?.lowercased(), sm != hm {
+            out.lastStatus = nil; out.driveFileId = nil; out.statusAt = nil; out.folderId = nil
+        }
+        return out
     }
 
     /// records.jsonl の未取り込み分を取り込む。位置が使えない（縮んだ・置き換わった）ときは先頭から取り込み直す。

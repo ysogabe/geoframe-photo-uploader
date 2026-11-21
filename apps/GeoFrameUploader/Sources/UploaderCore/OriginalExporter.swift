@@ -114,6 +114,9 @@ final class HashingFileSink: @unchecked Sendable {
 
 /// PhotoKit の `.photo` リソースを一切加工せずに一時ファイルへストリーミングする。
 public final class OriginalExporter: OriginalExporting, @unchecked Sendable {
+    /// 一時ディレクトリ名の接頭辞（後ろに UUID）。`TempSweeper` が残骸の判定に使う。
+    public static let tempDirPrefix = "GeoFrameUploader-"
+
     public let tempDir: URL
     public var localTimeout: TimeInterval = 120
     public var networkTimeout: TimeInterval = 600
@@ -121,7 +124,7 @@ public final class OriginalExporter: OriginalExporting, @unchecked Sendable {
     /// プライベートな一時ディレクトリ（0700）を作る。
     public init(tempRoot: URL? = nil) throws {
         let root = tempRoot ?? FileManager.default.temporaryDirectory
-        let dir = root.appendingPathComponent("GeoFrameUploader-\(UUID().uuidString)", isDirectory: true)
+        let dir = root.appendingPathComponent("\(Self.tempDirPrefix)\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         tempDir = dir

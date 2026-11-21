@@ -56,6 +56,8 @@ public enum DuplicatePrecheck {
                                 remote: RemoteIndex, cache: ResultCache? = nil,
                                 folderId: String? = nil) async throws -> PrecheckResult {
         try Task.checkCancellation()
+        // 他のプロセス（CLI 等）が書いた item-cache.json / records.jsonl を先に取り込む
+        cache?.refresh()
         let h = try await hash(item: item, exporter: exporter, cache: cache)
         let prior = priorSelected.filter { $0.localIdentifier != item.localIdentifier }
         let input = PlanInput(localIdentifier: item.localIdentifier, eligibility: item.eligibility, md5: h.md5)

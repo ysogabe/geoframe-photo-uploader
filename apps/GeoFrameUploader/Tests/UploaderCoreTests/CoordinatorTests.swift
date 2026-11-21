@@ -172,6 +172,110 @@ final class CoordinatorTests: XCTestCase {
     }
 }
 
+/// 一覧での照合の途中で中止されたとき。
+final class CancelDuringVerifyTests: XCTestCase {
+    var dir: URL!
+    override func setUp() { dir = makeTempDir() }
+    override func tearDown() { try? FileManager.default.removeItem(at: dir) }
+
+    func md5(_ d: Data) -> String { Insecure.MD5.hash(data: d).map { String(format: "%02x", $0) }.joined() }
+
+    func item(_ id: String) -> PhotoItem {
+        PhotoItem(localIdentifier: id, originalFilename: "\(id).HEIC", uti: "public.heic", mediaKind: .image, creationDate: Date())
+    }
+
+    func makeCoordinator(_ fake: FakeDrive, exporter: FakeExporter, records: RecordStore?, cache: ResultCache?,
+                         options: UploadCoordinator.Options, sleeper: @escaping Sleeper) -> UploadCoordinator {
+        StubProtocol.setHandler(fake.handle)
+        let drive = DriveClient(session: StubProtocol.session(), tokens: FakeTokens(), sleeper: noSleep)
+        return UploadCoordinator(drive: drive, exporter: exporter, records: records, cache: cache,
+                                 options: options, sleeper: sleeper)
+    }
+
+    /// `.verifying` を受け取った時点で実行中のタスク自身を中止する（onEvent は実行中のタスクから同期で呼ばれる）。
+    static let cancelAtVerify: @Sendable (UploadEvent) -> Void = { ev in
+        if ev.phase == .verifying { withUnsafeCurrentTask { $0?.cancel() } }
+    }
+
+    func testCancelDuringVerifyStillVerifiesAndReportsSent() async throws {
+        let bytes = Data("photo".utf8)
+        let fake = FakeDrive(files: [])
+        let records = RecordStore(fileURL: dir.appendingPathComponent("records.jsonl"))
+        let cache = ResultCache(fileURL: dir.appendingPathComponent("item-cache.json"))
+        let a = item("A")
+        let c = makeCoordinator(fake, exporter: FakeExporter(dir: dir, contents: ["A": bytes]), records: records, cache: cache,
+                                options: .init(verifyAttempts: 3, verifyDelay: 0, verifyBudgetAfterCancel: 5),
+                                sleeper: defaultSleeper)
+        // 中止するのは送信用のタスクだけ（テスト自身のタスクは中止しない）
+        let s = try await Task { try await c.run(items: [a, self.item("B")], folderId: "FOLDER", maxItemsPerRun: 2,
+                                                 onEvent: Self.cancelAtVerify) }.value
+        XCTAssertEqual(s.results.count, 1)   // B は始めない
+        XCTAssertTrue(s.cancelled)
+        XCTAssertEqual(s.results[0].status, .sent)
+        XCTAssertTrue(s.results[0].verified)
+        XCTAssertNil(s.results[0].error)
+        XCTAssertEqual(fake.uploads, 1)
+        XCTAssertEqual(try records.readAll().map(\.result), [.sent])
+        XCTAssertEqual(cache.entry(for: a)?.lastStatus, .sent)
+        XCTAssertEqual(cache.entry(for: a)?.driveFileId, "NEW1")
+    }
+
+    func testCancelDuringVerifyWhenListingUnavailableRecordsInterruptedFailure() async throws {
+        let bytes = Data("photo".utf8)
+        let fake = FakeDrive(files: [])
+        fake.hideFromListing = true   // 照合の一覧に出てこない（結果整合性の遅れ）
+        let recURL = dir.appendingPathComponent("records.jsonl")
+        let records = RecordStore(fileURL: recURL)
+        let cacheURL = dir.appendingPathComponent("item-cache.json")
+        let cache = ResultCache(fileURL: cacheURL, records: records)
+        let exporter = FakeExporter(dir: dir, contents: ["A": bytes])
+        let a = item("A")
+        let realSleep: Sleeper = { _ in try await Task.sleep(nanoseconds: 20_000_000) }
+        let c = makeCoordinator(fake, exporter: exporter, records: records, cache: cache,
+                                options: .init(verifyAttempts: 10_000, verifyDelay: 0.02, verifyBudgetAfterCancel: 0.2),
+                                sleeper: realSleep)
+        let started = Date()
+        let s = try await Task { try await c.run(items: [a], folderId: "FOLDER", maxItemsPerRun: 1,
+                                                 onEvent: Self.cancelAtVerify) }.value
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)   // 上限で打ち切る
+        XCTAssertTrue(s.cancelled)
+        let r = s.results[0]
+        XCTAssertEqual(r.status, .failed)
+        XCTAssertFalse(r.verified)
+        XCTAssertFalse(r.wasCancelled)
+        XCTAssertTrue(r.verificationInterrupted)
+        XCTAssertTrue(r.error!.hasPrefix("アップロード済み（応答の md5 は一致）・中止のため一覧での照合は未完了"), r.error!)
+        XCTAssertTrue(r.error!.contains("fileId=NEW1"))
+        XCTAssertEqual(r.driveFileId, "NEW1")
+        XCTAssertEqual(r.md5, md5(bytes))
+        XCTAssertEqual(fake.uploads, 1)
+
+        // 記録とキャッシュ（直接の書き込みと records.jsonl からの取り込み）が一致する
+        let rec = try XCTUnwrap(try records.readAll().first)
+        XCTAssertEqual(rec.result, .failed)
+        XCTAssertEqual(rec.driveFileId, "NEW1")
+        XCTAssertEqual(rec.md5, md5(bytes))
+        XCTAssertEqual(cache.entry(for: a)?.lastStatus, .failed)
+        XCTAssertEqual(cache.entry(for: a)?.driveFileId, "NEW1")
+        XCTAssertEqual(cache.entry(for: a)?.md5, md5(bytes))
+        let imported = ResultCache(fileURL: dir.appendingPathComponent("other-cache.json"), records: RecordStore(fileURL: recURL))
+        XCTAssertEqual(imported.entry(for: a)?.lastStatus, .failed)
+        XCTAssertEqual(imported.entry(for: a)?.driveFileId, "NEW1")
+        XCTAssertEqual(imported.entry(for: a)?.md5, md5(bytes))
+
+        // 次の送信では、キャッシュの md5 が Drive 一覧にあるので書き出さずに「重複」（再送しない）
+        fake.hideFromListing = false
+        let c2 = makeCoordinator(fake, exporter: exporter, records: records, cache: cache,
+                                 options: .init(verifyAttempts: 3, verifyDelay: 0), sleeper: noSleep)
+        let s2 = try await c2.run(items: [a], folderId: "FOLDER", maxItemsPerRun: 1)
+        XCTAssertEqual(s2.results[0].status, .skippedDuplicate)
+        XCTAssertEqual(s2.results[0].duplicateOfFileId, "NEW1")
+        XCTAssertEqual(exporter.calls, ["A"])
+        XCTAssertEqual(fake.uploads, 1)
+        XCTAssertEqual(cache.entry(for: a)?.lastStatus, .duplicateRemote)
+    }
+}
+
 final class EventBox: @unchecked Sendable {
     private let lock = NSLock()
     private var events: [UploadEvent] = []

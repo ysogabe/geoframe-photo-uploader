@@ -314,6 +314,87 @@ final class ResultCacheTests: XCTestCase {
         gui.refresh()
         XCTAssertEqual(gui.entry(for: a)?.lastStatus, .failed)
     }
+
+    // MARK: フィールド単位のマージ
+
+    func testStaleWriterKeepsOtherProcessStatusAndAddsNewerHash() throws {
+        let a = photo("A")
+        let procA = ResultCache(fileURL: cacheURL)
+        let procB = ResultCache(fileURL: cacheURL)   // A の書き込みより前に読み込んだ古いプロセス
+        procA.recordStatus(item: a, status: .sent, driveFileId: "FA", folderId: "FOLDER", md5: "aaa",
+                           sha256: "sha-a", byteCount: 10, at: t0)
+        procB.recordHash(item: a, md5: "aaa", sha256: "sha-b", byteCount: 11, at: t0 + 60)
+        for e in [ResultCache(fileURL: cacheURL).entry(for: a), procB.entry(for: a)] {
+            XCTAssertEqual(e?.lastStatus, .sent)
+            XCTAssertEqual(e?.driveFileId, "FA")
+            XCTAssertEqual(e?.folderId, "FOLDER")
+            XCTAssertEqual(e?.statusAt, t0)
+            XCTAssertEqual(e?.sha256, "sha-b")   // B のハッシュの方が新しい
+            XCTAssertEqual(e?.byteCount, 11)
+            XCTAssertEqual(e?.hashedAt, t0 + 60)
+        }
+        procA.refresh()
+        XCTAssertEqual(procA.entry(for: a)?.lastStatus, .sent)
+        XCTAssertEqual(procA.entry(for: a)?.sha256, "sha-b")
+    }
+
+    func testFieldWiseMergeRules() {
+        let base = CacheEntry(originalFilename: "A.HEIC", uti: "public.heic")
+        var status = base
+        status.md5 = "aaa"; status.hashedAt = t0; status.lastStatus = .sent; status.driveFileId = "FA"
+        status.statusAt = t0; status.folderId = "FOLDER"
+        var hash = base
+        hash.md5 = "AAA"; hash.sha256 = "sha"; hash.byteCount = 5; hash.hashedAt = t0 + 10
+
+        // 状態はディスク、ハッシュはメモリ（同じ md5）→ 両方残す
+        let m1 = ResultCache.merge(memory: hash, disk: status)
+        XCTAssertEqual(m1.lastStatus, .sent); XCTAssertEqual(m1.driveFileId, "FA"); XCTAssertEqual(m1.statusAt, t0)
+        XCTAssertEqual(m1.md5, "AAA"); XCTAssertEqual(m1.sha256, "sha"); XCTAssertEqual(m1.hashedAt, t0 + 10)
+        // 向きを逆にしても同じ
+        let m2 = ResultCache.merge(memory: status, disk: hash)
+        XCTAssertEqual(m2.lastStatus, .sent); XCTAssertEqual(m2.driveFileId, "FA"); XCTAssertEqual(m2.sha256, "sha")
+
+        // 新しいハッシュが別の内容 → 古い内容についての状態は捨てる
+        var other = hash
+        other.md5 = "bbb"
+        let m3 = ResultCache.merge(memory: other, disk: status)
+        XCTAssertEqual(m3.md5, "bbb")
+        XCTAssertNil(m3.lastStatus); XCTAssertNil(m3.driveFileId); XCTAssertNil(m3.statusAt); XCTAssertNil(m3.folderId)
+
+        // 同時刻はメモリ側
+        var memFailed = status
+        memFailed.lastStatus = .failed; memFailed.driveFileId = nil
+        XCTAssertEqual(ResultCache.merge(memory: memFailed, disk: status).lastStatus, .failed)
+        XCTAssertEqual(ResultCache.merge(memory: status, disk: memFailed).lastStatus, .sent)
+
+        // 別の写真についての記録（ファイル名が違う）はエントリ単位で新しい方
+        var renamed = CacheEntry(originalFilename: "B.HEIC", uti: "public.heic")
+        renamed.md5 = "ccc"; renamed.hashedAt = t0 + 100
+        XCTAssertEqual(ResultCache.merge(memory: status, disk: renamed), renamed)
+        XCTAssertEqual(ResultCache.merge(memory: renamed, disk: status), renamed)
+    }
+
+    func testWatermarkAdoptionDoesNotDropImportedStatus() throws {
+        let records = RecordStore(fileURL: recURL)
+        let a = photo("A")
+        try records.append(rec(photo("Z"), .failed, md5: "zzz", at: t0, error: "x"))
+        let procA = ResultCache(fileURL: cacheURL, records: records)
+        let procB = ResultCache(fileURL: cacheURL, records: records)   // ここから古くなる
+        // 別のプロセス（古いビルド）が送信済みを追記し、A がそれを取り込んで保存（取り込み位置も進む）
+        try records.append(rec(a, .sent, md5: "aaa", fileId: "FA", at: t0 + 10))
+        procA.refresh()
+        XCTAssertEqual(procA.entry(for: a)?.lastStatus, .sent)
+        // 古い B が同じ写真のハッシュを記録 → A の取り込み位置を採用しても、A が取り込んだ状態を失わない
+        procB.recordHash(item: a, md5: "aaa", sha256: "sha-b", byteCount: 1, at: t0 + 20)
+        procB.refresh()
+        XCTAssertEqual(procB.entry(for: a)?.lastStatus, .sent)
+        XCTAssertEqual(procB.entry(for: a)?.driveFileId, "FA")
+        XCTAssertEqual(procB.recordsWatermark, procA.recordsWatermark)
+        let disk = ResultCache(fileURL: cacheURL, records: records)
+        XCTAssertEqual(disk.entry(for: a)?.lastStatus, .sent)
+        XCTAssertEqual(disk.entry(for: a)?.driveFileId, "FA")
+        XCTAssertEqual(disk.entry(for: a)?.sha256, "sha-b")
+    }
 }
 
 // MARK: - コーディネーター / 重複確認とキャッシュ

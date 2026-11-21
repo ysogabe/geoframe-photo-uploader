@@ -563,6 +563,58 @@ final class AppModel: ObservableObject {
         precheckTask?.cancel()
     }
 
+    // MARK: 終了
+
+    /// 終了・ウィンドウを閉じる前に確認が要る処理（送信・手動の重複確認）。
+    var needsQuitConfirmation: Bool { isSending || isPrechecking }
+
+    /// 終了前に止めて待つ処理（自動の重複確認を含む。一時ファイルの削除まで待つ）。
+    var hasActiveWork: Bool {
+        needsQuitConfirmation || uploadSummaryTask != nil || precheckTask != nil
+            || autoItemTask != nil || autoWorkerTask != nil
+    }
+
+    /// 終了確認の文言。
+    var quitConfirmationMessage: String {
+        isSending ? "送信中です。中止して終了しますか？" : "重複を確認中です。中止して終了しますか？"
+    }
+
+    /// 終了のため、実行中の送信・重複確認を中止し、終わる（記録の書き込みと一時ファイルの削除）まで最大 `timeout` 秒待つ。
+    /// 時間内に終わったら真。
+    @discardableResult
+    func stopForTermination(timeout: TimeInterval = 15) async -> Bool {
+        let upload = uploadSummaryTask
+        let pre = precheckTask
+        let autoItem = autoItemTask
+        let autoWorker = autoWorkerTask
+        if upload != nil || pre != nil { cancelRun() }
+        cancelAutoPrecheck()
+        let finished = await Self.wait(timeout: timeout) {
+            _ = try? await upload?.value
+            await pre?.value
+            _ = try? await autoItem?.value
+            await autoWorker?.value
+        }
+        if !finished { NSLog("GeoFrameUploader: 終了待ちが \(Int(timeout)) 秒を超えたため、そのまま終了します") }
+        return finished
+    }
+
+    /// `work` が終わるか `timeout` 秒経つまで待つ（`Task.value` の待ちは中止で抜けないので、先に来た方で再開する）。
+    private static func wait(timeout: TimeInterval, _ work: @escaping @Sendable () async -> Void) async -> Bool {
+        let once = ResumeOnce()
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            once.set(cont)
+            Task.detached {
+                await work()
+                once.resume(true)
+            }
+            Task.detached {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                once.resume(false)
+            }
+        }
+    }
+
     // MARK: 記録
 
     func revealRecords() {
@@ -702,5 +754,29 @@ final class AppModel: ObservableObject {
         autoQueue.reset()
         autoDeselectedNames = []
         if autoProgress != nil { autoProgress = nil }
+    }
+}
+
+/// 継続を 1 回だけ再開する。
+private final class ResumeOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cont: CheckedContinuation<Bool, Never>?
+    private var result: Bool?
+
+    func set(_ c: CheckedContinuation<Bool, Never>) {
+        lock.lock()
+        if let r = result { lock.unlock(); c.resume(returning: r); return }
+        cont = c
+        lock.unlock()
+    }
+
+    func resume(_ value: Bool) {
+        lock.lock()
+        guard result == nil else { lock.unlock(); return }
+        result = value
+        let c = cont
+        cont = nil
+        lock.unlock()
+        c?.resume(returning: value)
     }
 }

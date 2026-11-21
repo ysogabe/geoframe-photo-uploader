@@ -31,6 +31,8 @@ struct CLI {
         report["subcommand"] = subcommand ?? NSNull()
         report["bundleIdentifier"] = Bundle.main.bundleIdentifier ?? NSNull()
         report["processTimeZone"] = TimeZone.current.identifier
+        // 前回強制終了したときに残った原本の一時ディレクトリ（1 時間以上前のもの）を掃除する
+        for u in TempSweeper.sweepStale() { CLI.log("removed stale temp dir \(u.lastPathComponent)") }
         let service = UploaderService(log: { CLI.log($0) })
         var code: Int32 = 0
         do {

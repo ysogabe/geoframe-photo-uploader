@@ -53,7 +53,7 @@ public final class DriveClient: @unchecked Sendable {
     public static let folderMimeType = "application/vnd.google-apps.folder"
 
     public struct Options: Sendable {
-        /// チャンクサイズ（256 KiB の倍数）。既定 8 MiB。
+        /// チャンクサイズ（256 KiB の倍数）。既定 8 MiB（進捗はチャンクの途中でもバイト単位で通知する）。
         public var chunkSize: Int
         /// 1 チャンクあたりの最大試行回数。
         public var maxAttemptsPerChunk: Int
@@ -231,19 +231,23 @@ public final class DriveClient: @unchecked Sendable {
         var offset: Int64 = 0
         var attempts = 0
         var lastError = ""
-        progress?(0, total)
+        // セッションごとに作り直す（再作成時だけ 0 に戻る。古いセッションの遅れた通知は新しい方に届かない）
+        let gate = ProgressGate(total: total, progress: progress)
+        gate.start()
         while true {
             try Task.checkCancellation()
             let len = Int(min(Int64(options.chunkSize), max(0, total - offset)))
             let outcome: Result<ChunkResult, Error>
+            let chunkStart = offset
             do {
-                outcome = .success(try await putChunk(uri, fh: fh, offset: offset, length: len, total: total))
+                outcome = .success(try await putChunk(uri, fh: fh, offset: offset, length: len, total: total,
+                                                      onSent: { sent in gate.report(chunkStart + min(sent, Int64(len))) }))
             } catch let e as TransientError {
                 outcome = .failure(e)
             }
             switch outcome {
             case .success(.done(let f)):
-                progress?(total, total)
+                gate.report(total)
                 return f
             case .success(.advanced(let next)):
                 if next > offset {
@@ -254,7 +258,7 @@ public final class DriveClient: @unchecked Sendable {
                     if attempts >= options.maxAttemptsPerChunk { throw DriveError.retriesExhausted("no progress at offset \(offset)") }
                 }
                 offset = min(next, total)
-                progress?(offset, total)
+                gate.report(offset)
                 continue
             case .failure(let e):
                 lastError = "\(e)"
@@ -268,11 +272,12 @@ public final class DriveClient: @unchecked Sendable {
                     switch try await queryStatus(uri, total: total) {
                     case .done(let f):
                         // 照会で完了が判明した場合は再送しない（重複ファイル作成を避ける）
-                        progress?(total, total)
+                        gate.report(total)
                         return f
                     case .advanced(let next):
+                        // サーバーが受け取れていなかった分は送り直す（表示は戻さない）
                         offset = min(next, total)
-                        progress?(offset, total)
+                        gate.report(offset)
                     }
                     break resync
                 } catch let e as TransientError {
@@ -291,7 +296,8 @@ public final class DriveClient: @unchecked Sendable {
         return exp * Double.random(in: 0.5...1.0)
     }
 
-    private func putChunk(_ uri: URL, fh: FileHandle, offset: Int64, length: Int, total: Int64) async throws -> ChunkResult {
+    private func putChunk(_ uri: URL, fh: FileHandle, offset: Int64, length: Int, total: Int64,
+                          onSent: @escaping @Sendable (Int64) -> Void) async throws -> ChunkResult {
         let data: Data
         do {
             try fh.seek(toOffset: UInt64(offset))
@@ -307,8 +313,12 @@ public final class DriveClient: @unchecked Sendable {
             req.setValue("bytes */\(total)", forHTTPHeaderField: "Content-Range")
         }
         req.setValue(String(length), forHTTPHeaderField: "Content-Length")
-        req.httpBody = data
-        return try await interpretSessionResponse(req)
+        guard length > 0 else {
+            req.httpBody = Data()
+            return try await interpretSessionResponse(req)
+        }
+        // 本文は upload タスクで送り、送信済みバイト数をチャンクの途中でも通知する
+        return try await interpretSessionResponse(req, upload: UploadBody(data: data, onSent: onSent))
     }
 
     private func queryStatus(_ uri: URL, total: Int64) async throws -> ChunkResult {
@@ -321,10 +331,10 @@ public final class DriveClient: @unchecked Sendable {
         return try await interpretSessionResponse(req)
     }
 
-    private func interpretSessionResponse(_ req: URLRequest) async throws -> ChunkResult {
+    private func interpretSessionResponse(_ req: URLRequest, upload: UploadBody? = nil) async throws -> ChunkResult {
         let data: Data, http: HTTPURLResponse
         do {
-            (data, http) = try await sendAuthorized(req)
+            (data, http) = try await sendAuthorized(req, upload: upload)
         } catch let e as URLError where e.code != .cancelled {
             throw TransientError(description: "network: \(e.code.rawValue)")
         }
@@ -347,21 +357,35 @@ public final class DriveClient: @unchecked Sendable {
     // MARK: 送信共通
 
     /// Authorization を付けて送信。401 なら 1 回だけリフレッシュして再送。
-    private func sendAuthorized(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    private func sendAuthorized(_ request: URLRequest, upload: UploadBody? = nil) async throws -> (Data, HTTPURLResponse) {
         var req = request
         req.setValue("Bearer \(try await tokens.accessToken())", forHTTPHeaderField: "Authorization")
-        var (data, http) = try await perform(req)
+        var (data, http) = try await perform(req, upload: upload)
         if http.statusCode == 401 {
             log("401 from Drive; refreshing access token once")
             req.setValue("Bearer \(try await tokens.refreshAfterUnauthorized())", forHTTPHeaderField: "Authorization")
-            (data, http) = try await perform(req)
+            (data, http) = try await perform(req, upload: upload)
             if http.statusCode == 401 { throw DriveError.unauthorized }
         }
         return (data, http)
     }
 
-    private func perform(_ req: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let (data, resp) = try await session.data(for: req)
+    /// upload タスクで送る本文と、送信済みバイト数（この本文の中での位置）の通知先。
+    struct UploadBody: Sendable {
+        let data: Data
+        let onSent: @Sendable (Int64) -> Void
+    }
+
+    private func perform(_ req: URLRequest, upload: UploadBody? = nil) async throws -> (Data, HTTPURLResponse) {
+        let data: Data, resp: URLResponse
+        if let upload {
+            var r = req
+            r.httpBody = nil   // 本文は from: で渡す（両方あると upload タスクは失敗する）
+            (data, resp) = try await session.upload(for: r, from: upload.data,
+                                                    delegate: UploadProgressDelegate(onSent: upload.onSent))
+        } else {
+            (data, resp) = try await session.data(for: req)
+        }
         guard let http = resp as? HTTPURLResponse else { throw DriveError.invalidResponse("non-HTTP response") }
         return (data, http)
     }
@@ -391,5 +415,49 @@ public final class DriveClient: @unchecked Sendable {
             ?? String(decoding: data.prefix(500), as: UTF8.self)
         if status == 401 { return .unauthorized }
         return .http(status: status, message: Redactor.redact(msg))
+    }
+}
+
+/// 1 回のアップロードセッションの進捗通知。値は戻さない（再同期でサーバーの位置が手前でも表示は据え置く）。
+final class ProgressGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let total: Int64
+    private let progress: DriveClient.Progress?
+    private var high: Int64 = -1
+
+    init(total: Int64, progress: DriveClient.Progress?) { self.total = total; self.progress = progress }
+
+    /// セッション開始（0 を通知する）。
+    func start() {
+        lock.withLock {
+            high = 0
+            progress?(0, total)
+        }
+    }
+
+    /// `sent`（0...total に丸める）が今までの最大を超えたときだけ通知する。
+    /// 通知もロック内で行う（別スレッドからの通知が前後して値が戻って見えないように）。
+    func report(_ sent: Int64) {
+        let v = max(0, min(sent, total))
+        lock.withLock {
+            guard v > high else { return }
+            high = v
+            progress?(v, total)
+        }
+    }
+
+    var reported: Int64 { lock.withLock { max(0, high) } }
+}
+
+/// チャンクの PUT 1 回分のタスクデリゲート。送信済みバイト数（本文の中での位置）を通知する。
+/// URLProtocol のスタブなど、通知が来ない経路ではチャンク単位の通知だけになる。
+final class UploadProgressDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let onSent: @Sendable (Int64) -> Void
+
+    init(onSent: @escaping @Sendable (Int64) -> Void) { self.onSent = onSent }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
+                    totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        onSent(max(0, totalBytesSent))
     }
 }
