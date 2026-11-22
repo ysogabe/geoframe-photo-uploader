@@ -14,12 +14,19 @@ struct PhotoCell: View {
     let cached: CacheEntry?
     let cacheWarning: String?
     let duplicateNote: String?
+    let ranking: RankedMember?
+    let standaloneIssues: [String]?
     let thumbnails: ThumbnailCache
-    let onToggle: () -> Void
+    let onToggle: (_ shiftPressed: Bool) -> Void
 
     @State private var image: NSImage?
 
     private var eligible: Bool { item.eligibility.isEligible }
+
+    private func triggerToggle() {
+        let shift = NSEvent.modifierFlags.contains(.shift)
+        onToggle(shift)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -43,6 +50,19 @@ struct PhotoCell: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .help(reason)
+            }
+            if let issues = standaloneIssues, !issues.isEmpty {
+                Text("注意: \(issues.joined(separator: "・"))")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                    .help(issues.joined(separator: " / "))
+            } else if let ranking, !ranking.issues.isEmpty && !ranking.isRecommended {
+                Text(ranking.issues.joined(separator: "・"))
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+                    .help(ranking.issues.joined(separator: " / "))
             }
             if let cacheWarning {
                 Text(cacheWarning)
@@ -71,7 +91,7 @@ struct PhotoCell: View {
         )
         .opacity(eligible ? 1 : 0.45)
         .contentShape(Rectangle())
-        .onTapGesture { if isSelectable { onToggle() } }
+        .onTapGesture { if isSelectable { triggerToggle() } }
         .task(id: item.id) {
             if let hit = thumbnails.cached(item.id) { image = hit; return }
             let img = await thumbnails.image(for: item.id)
@@ -95,13 +115,14 @@ struct PhotoCell: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 8))
             .overlay(alignment: .topLeading) { checkbox }
+            .overlay(alignment: .topTrailing) { qualityOverlay }
             .overlay(alignment: .bottom) { statusOverlay }
     }
 
     @ViewBuilder
     private var checkbox: some View {
         if eligible {
-            Button(action: onToggle) {
+            Button(action: triggerToggle) {
                 Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                     .font(.title3)
                     .symbolRenderingMode(.palette)
@@ -112,7 +133,34 @@ struct PhotoCell: View {
             .buttonStyle(.plain)
             .disabled(!isSelectable)
             .padding(6)
-            .help(isSelected ? "選択を解除" : "選択")
+            .help(isSelected ? "選択を解除（Shift+クリックで範囲選択）" : "選択（Shift+クリックで範囲選択）")
+        }
+    }
+
+    @ViewBuilder
+    private var qualityOverlay: some View {
+        if let ranking {
+            let tip = (ranking.reasons + ranking.issues).joined(separator: " / ")
+            if ranking.isRecommended {
+                Text(String(format: "★ 推奨 %.1f", ranking.score))
+                    .font(.system(size: 10, weight: .bold).monospacedDigit())
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .foregroundStyle(.white)
+                    .background(Color.orange, in: Capsule())
+                    .shadow(radius: 1)
+                    .padding(6)
+                    .help(tip.isEmpty ? "グループ内で推奨" : tip)
+            } else {
+                Text(String(format: "%.1f", ranking.score))
+                    .font(.system(size: 10, weight: .semibold).monospacedDigit())
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .foregroundStyle(.white)
+                    .background(Color.black.opacity(0.55), in: Capsule())
+                    .padding(6)
+                    .help(tip.isEmpty ? "品質スコア" : tip)
+            }
         }
     }
 

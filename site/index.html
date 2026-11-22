@@ -32,7 +32,7 @@
       <a href="#faq">FAQ</a>
       <a href="#docs">ドキュメント</a>
     </nav>
-    <span class="stage-label"><span aria-hidden="true"></span>v0.1（ソースからビルド）</span>
+    <span class="stage-label"><span aria-hidden="true"></span>v0.2（ソースからビルド）</span>
   </header>
 
   <main id="top">
@@ -101,16 +101,34 @@
       </div>
 
       <div class="screen-tabs" role="tablist" aria-label="画面プレビュー切替">
-        <button type="button" role="tab" aria-selected="true" data-tab="main"><span>01</span>一覧と自動重複確認</button>
-        <button type="button" role="tab" aria-selected="false" data-tab="sending"><span>02</span>送信モーダルパネル</button>
-        <button type="button" role="tab" aria-selected="false" data-tab="overview"><span>03</span>全体ワークフロー図</button>
+        <button type="button" role="tab" aria-selected="true" data-tab="sections"><span>01</span>場所・時間枠 &amp; 推奨選択</button>
+        <button type="button" role="tab" aria-selected="false" data-tab="compare"><span>02</span>類似写真の見比べパネル</button>
+        <button type="button" role="tab" aria-selected="false" data-tab="main"><span>03</span>一覧と自動重複確認</button>
+        <button type="button" role="tab" aria-selected="false" data-tab="sending"><span>04</span>送信モーダルパネル</button>
+        <button type="button" role="tab" aria-selected="false" data-tab="overview"><span>05</span>全体ワークフロー図</button>
       </div>
 
       <div class="monitor-shell">
-        <figure class="shot tab-pane" data-pane="main">
+        <figure class="shot tab-pane" data-pane="sections">
+          <img src="images/v02-ui-sections.png" width="1040" height="811" alt="GeoFrame Uploader v0.2 の場所・時間枠セクション表示と類似グループまとめ・★ 推奨自動選択画面">
+          <figcaption>
+            <span><strong>場所・時間枠 &amp; 推奨選択（v0.2 見本）</strong> 撮影時刻と移動距離で写真をセクションに自動分割し、逆ジオコーディング地名を表示。似た写真は点線枠に束ねて「★ 推奨」バッジを付け、「推奨を自動選択」で各枠のベストショットを一括選択できます。</span>
+            <span>見本画面</span>
+          </figcaption>
+        </figure>
+
+        <figure class="shot tab-pane" data-pane="compare" hidden>
+          <img src="images/v02-ui-similar-compare.png" width="1040" height="636" alt="GeoFrame Uploader v0.2 の類似写真見比べモーダルパネル。鮮明度・露出・コントラストの棒グラフとスコアを表示">
+          <figcaption>
+            <span><strong>類似写真の見比べパネル（v0.2 見本）</strong> 「見比べて選ぶ」から品質スコア順（お気に入り最優先）で拡大比較。鮮明度・露出・コントラストの内訳や注意タグを確認しながら、<code>← / →</code>・<code>Space</code>・<code>1〜9</code>・<code>Enter</code> のキーボード操作で素早く選べます。</span>
+            <span>見本画面</span>
+          </figcaption>
+        </figure>
+
+        <figure class="shot tab-pane" data-pane="main" hidden>
           <img src="images/screen-main.png" width="1040" height="929" alt="GeoFrame Uploader の一覧画面。日付絞り込み、送信済み・重複バッジ、対象外表示、自動重複確認の切り替えを表示">
           <figcaption>
-            <span><strong>一覧画面（見本）</strong> 単日 / 期間で写真を読み込み、前回結果バッジと形式判定を表示。「選んだら自動で重複確認」オンにすると、選択した写真をすぐに（約 0.3 秒後）Google ドライブと照合します。</span>
+            <span><strong>一覧画面（見本）</strong> 単日 / 期間で写真を読み込み、前回結果バッジと形式判定を表示。「選んだら自動で重複確認」をオンにすると、選択した写真をすぐに（約 0.3 秒後）Google ドライブと照合します。</span>
             <span>見本画面</span>
           </figcaption>
         </figure>
@@ -139,7 +157,7 @@
           <p class="eyebrow">02 / Features</p>
           <h2 id="features-title">「原本を壊さない」ための、<br class="mobile-only">細かな気配り。</h2>
         </div>
-        <p class="section-aside">個人利用でも安心して大量の写真を扱えるよう、<br>検証・キャッシュ・安全停止を備えています。</p>
+        <p class="section-aside">場所・類似写真での賢い絞り込みと、<br>検証・キャッシュ・安全停止を備えています。</p>
       </div>
 
       <div class="feature-grid">
@@ -147,6 +165,16 @@
           <span class="micro-label">ORIGINAL BYTES</span>
           <h3>編集後も Live Photo も原本だけ</h3>
           <p><code>PHAssetResource</code> の <code>.photo</code> リソースをそのまま書き出します。編集後の再エンコード画像（<code>.fullSizePhoto</code>）や Live Photo の動画部分（<code>.pairedVideo</code>）は送りません。</p>
+        </article>
+        <article class="feature">
+          <span class="micro-label">LOCATION &amp; TIME SECTIONS</span>
+          <h3>場所・時間枠でセクション表示</h3>
+          <p>撮影間隔（15/30/60 分）と移動距離（100m/300m/1km）で一覧を自動分割。「地名を表示」オン時は約 100 m 単位に丸めた代表座標から地名を表示し、枠単位の一括選択や <code>Shift+クリック</code> 範囲選択ができます。</p>
+        </article>
+        <article class="feature">
+          <span class="micro-label">SIMILARITY &amp; QUALITY PICK</span>
+          <h3>似た写真をまとめて「★ 推奨」を選択</h3>
+          <p>512 px サムネイルで 64-bit pHash と品質指標（鮮明度・露出・コントラスト）を解析。バーストや似た写真を点線枠にまとめ、「推奨を自動選択」や拡大見比べパネルでベストショットを素早く選べます。</p>
         </article>
         <article class="feature">
           <span class="micro-label">FORMAT FILTER</span>
@@ -169,9 +197,9 @@
           <p>アップロード応答の <code>md5Checksum</code> に加え、<code>files.list</code> を再取得してファイル ID と MD5 の一致を確認。両方が通った写真だけを <code>sent</code> と記録します。</p>
         </article>
         <article class="feature">
-          <span class="micro-label">RESULT CACHE</span>
-          <h3>前回結果を即座に表示</h3>
-          <p><code>item-cache.json</code> に MD5 と前回の結果を保持。再読み込み直後から「送信済み」「重複」を通信なしで表示し、キャッシュ済み写真は iCloud からの再取得を省きます。</p>
+          <span class="micro-label">RESULT &amp; QUALITY CACHE</span>
+          <h3>結果・品質・地名をローカルキャッシュ</h3>
+          <p><code>item-cache.json</code>（送信結果と MD5）・<code>quality-cache.json</code>（pHash と画質スコア）・<code>place-cache.json</code>（地名）を権限 <code>0600</code> で保存し、再読み込み時も高速表示します。</p>
         </article>
         <article class="feature">
           <span class="micro-label">OWN OAUTH + KEYCHAIN</span>
@@ -200,7 +228,7 @@
           <li>
             <span class="micro-label">01 / SOURCE</span>
             <strong>Apple Photos</strong>
-            <p>日付指定で <code>.photo</code> 原本を抽出。1 パスで MD5 / SHA-256 と EXIF 日時を取得。</p>
+            <p>日付指定で一覧化し、512 px サムネイルで選択支援。送信時のみ <code>.photo</code> 原本から 1 パスで MD5 / SHA-256 を取得。</p>
           </li>
           <li class="core">
             <span class="micro-label">02 / UPLOADER</span>
@@ -234,6 +262,14 @@
             <p>いいえ。<code>PHAssetResource</code> の <code>.photo</code>（撮影時の原本バイト列）だけを送ります。<code>.fullSizePhoto</code> は使わず再エンコードもしないため、元の MD5 と EXIF がそのまま残ります。</p>
           </details>
           <details>
+            <summary>類似判定や品質解析のために iCloud から原本をダウンロードしますか？</summary>
+            <p>いいえ。類似グルーピング（64-bit pHash）と品質評価は 512 px サムネイルだけを使ってローカルで計算し、<code>quality-cache.json</code> に保存します。原本の取得（または iCloud からのダウンロード）は「送信」や「重複を確認」を実行する写真に限られます。</p>
+          </details>
+          <details>
+            <summary>「地名を表示」を使うと位置情報が外部に送信されますか？</summary>
+            <p>オンの場合、セクションの代表座標を約 100 m 単位（小数第 3 位）に丸めた上で Apple のジオコーディングサービス（<code>CLGeocoder</code>）へ送信し、結果は <code>place-cache.json</code> に保存します。外部へ座標を送らず座標のまま表示したい場合は「地名を表示」をオフにしてください。</p>
+          </details>
+          <details>
             <summary>Google ドライブ上の既存ファイルが上書きされることはありますか？</summary>
             <p>ありません。常に新規ファイル作成（<code>files.create</code> 相当）のみを行い、既存ファイルの更新・改名・削除は行いません。同じ MD5 のファイルがフォルダ内に既にある場合はスキップします。</p>
           </details>
@@ -263,8 +299,9 @@
         <a href="https://github.com/ysogabe/geoframe-photo-uploader"><span>01 / SOURCE</span><strong>GitHub リポジトリ <span aria-hidden="true">↗</span></strong></a>
         <a href="https://github.com/ysogabe/geoframe-photo-uploader/blob/main/docs/USAGE.md"><span>02 / USAGE</span><strong>使い方と運用ガイド <span aria-hidden="true">↗</span></strong></a>
         <a href="https://github.com/ysogabe/geoframe-photo-uploader/blob/main/docs/DESIGN.md"><span>03 / DESIGN</span><strong>技術設計書 <span aria-hidden="true">↗</span></strong></a>
-        <a href="https://github.com/ysogabe/geoframe-photo-uploader/blob/main/docs/google-cloud-setup.md"><span>04 / OAUTH SETUP</span><strong>Google Cloud 側の準備 <span aria-hidden="true">↗</span></strong></a>
-        <a href="https://ysogabe.github.io/geoframe/"><span>05 / PHOTO SERVER</span><strong>受け手は GEOFRAME <span aria-hidden="true">↗</span></strong></a>
+        <a href="https://github.com/ysogabe/geoframe-photo-uploader/blob/main/docs/DESIGN-v0.2-selection.md"><span>04 / V0.2 DESIGN</span><strong>v0.2 選択支援・品質解析設計書 <span aria-hidden="true">↗</span></strong></a>
+        <a href="https://github.com/ysogabe/geoframe-photo-uploader/blob/main/docs/google-cloud-setup.md"><span>05 / OAUTH SETUP</span><strong>Google Cloud 側の準備 <span aria-hidden="true">↗</span></strong></a>
+        <a href="https://ysogabe.github.io/geoframe/"><span>06 / PHOTO SERVER</span><strong>受け手は GEOFRAME <span aria-hidden="true">↗</span></strong></a>
       </div>
     </section>
   </main>

@@ -29,14 +29,18 @@ apps/GeoFrameUploader/
     UploadCoordinator.swift     逐次アップロード・検証・イベント通知
     RecordStore.swift           records.jsonl（0600）
     ResultCache.swift           item-cache.json（写真ごとの MD5 と前回の結果、0600）
+    PhotoSectioner.swift        撮影時刻ギャップ + Haversine 距離による場所・時間枠分割
+    PlaceNameResolver.swift     CLGeocoder 直列キュー + place-cache.json（0600）
+    ImageQuality.swift          512px サムネイル解析（pHash / 画質指標）+ quality-cache.json（0600）
+    SimilarityGrouper.swift     セクション内類似クラスタリング・品質順位・推奨自動選択・Shift 範囲計算
     UploaderService.swift       UI と CLI が共有する窓口（actor）
     DuplicatePrecheck.swift     送信前の重複確認（MD5 はキャッシュ優先、照合のみ、送信しない）
     HTTPSupport.swift           伏字化（トークン類の除去）・フォームエンコード
   Sources/GeoFrameUploader/     実行ファイル（--cli なら CLI、無ければ SwiftUI）
     AppModel.swift              @MainActor の状態管理（UploaderService を保持）
     ThumbnailCache.swift        サムネイルのメモリキャッシュ
-    Views/                      ヘッダー / 日付指定 / グリッド / セル / 操作バー / 結果 / バナー
-  Tests/UploaderCoreTests/      XCTest（URLProtocol スタブで Drive / OAuth を検証）
+    Views/                      ヘッダー / 日付指定 / グリッド / セル / 見比べモーダル / 操作バー / 結果 / バナー
+  Tests/UploaderCoreTests/      XCTest（URLProtocol スタブ・v0.2 選択/品質/位置解決ロジックを検証）
   scripts/build-app.sh          release ビルド → .app 組み立て → 署名
   scripts/cli.sh                .app 経由で CLI を実行
 ```
@@ -46,8 +50,15 @@ UI を実装するときは `UploaderService` を使います。`status()`、`lo
 ## UI
 
 1. **ヘッダー**: 写真ライブラリの許可状態（未確認 / 許可済み / 拒否 / 限定）。フルアクセスでなければ許可ボタン、拒否・限定ならシステム設定（プライバシー > 写真）を開くボタンを出します。Google は oauth-client.json 未配置（置き場所と `docs/google-cloud-setup.md` を案内）/ 未接続（「Google に接続」、接続中はキャンセル可）/ 接続済み（「ログアウト」と送信先フォルダ名・ID）を表示します。状態はアプリがアクティブになるたびに再確認します（ダイアログは出しません）。
-2. **日付指定**: 単日 / 期間を選び「読み込む」（⌘R）。全 N 件 / 対象 M 件 / 対象外 K 件 / 前回送信済み n 件を表示します。
-3. **グリッド**: サムネイル、ファイル名、撮影時刻（HH:mm）、形式、お気に入り・バースト・Live・位置情報の印。対象外は薄く表示し、理由を出して選択できません。クリックまたはチェックで選択、「すべて選択」「選択解除」。
+2. **日付指定と選択補助バー**: 単日 / 期間を選び「読み込む」（⌘R）。全 N 件 / 対象 M 件 / 対象外 K 件 / 前回送信済み n 件 / 類似グループ数を表示します。読み込み後は表示設定バーで以下を切り替えられます（設定は `UserDefaults` に保存）：
+   - 表示モード: **「場所・時間枠」**（既定） / **「フラット一覧」**
+   - 分割しきい値: 時間差（`15分 / 30分 / 60分`、既定 30 分）と実 GPS の移動距離（`100m / 300m / 1km`、既定 300 m）
+   - **「地名を表示」**（既定オン）: セクション代表座標を小数第 3 位（約 100 m 精度）に丸めた上で Apple のジオコーディングサービス（`CLGeocoder`）で地名へ変換し、`place-cache.json` に保存します
+   - **「似た写真を束ねる」**（既定オン）: 同じバーストまたは 3 分以内・pHash ハミング距離 12 以下の似た写真を点線枠にまとめます
+   - **「お気に入りのみ」** / **「推奨を自動選択」**（品質解析の完了後に有効、手動選択を置換）
+3. **グリッド**: サムネイル、ファイル名、撮影時刻（HH:mm）、形式、お気に入り・バースト・Live・位置情報の印、品質スコア / **「★ 推奨」** バッジ、注意タグ（露出要確認など）。対象外は薄く表示し、理由を出して選択できません。クリック（`Shift + クリック` で表示中の対象写真を範囲選択/解除）またはチェックで選択、「すべて選択」「選択解除」。
+   - 「場所・時間枠」表示時はセクションごとに時刻範囲・地名・対象枚数・類似グループ数・選択件数を表示し、折りたたみ、**「推奨を選択」**（この枠分を追加）、**「枠内をすべて選択」**、**「解除」** が使えます。実 GPS が無いセクションは前後 2 時間以内の最寄り実 GPS を表示名にのみ一時借用（`（推定）` 表示）します。
+   - 類似グループの点線枠には **「見比べて選ぶ」** ボタンがあり、品質スコア順（お気に入り最優先）の拡大比較モーダルを開けます（7 枚以上は 6 枚ごとにページ送り）。キーボード操作（`← / →` で移動、`Space` で選択切替、`1〜9` で番号指定切替、`Enter` で確定、`Esc` でキャンセル）や「推奨だけ残す」に対応します。
    - 読み込んだ直後に、`item-cache.json` に残っている前回までの結果を通信せずに表示します: 「送信済み」（ツールチップに日時と fileId）/「重複（Drive に既存）」/「確認済み・未送信」/「前回失敗」。現在の送信先フォルダについての結果だけを出します。
    - 「すべて選択」は、送信済み・重複（Drive に既存）とみなせる写真を選びません。手動では選べます（送信時に Drive にまだあれば重複としてスキップされます）。
    - 「送信済み・重複を隠す」（既定オフ）で、それらを一覧から隠します。
@@ -93,6 +104,8 @@ scripts/build-app.sh       # .build/GeoFrameUploader.app を作って署名
 | `config.json` | `{"folderId": "...", "folderName": "GeoFrame"}`。`folderId` を省略すると、マイドライブ直下の `folderName` を検索して保存します。0 件や複数件のときは推測せずエラーにします |
 | `records.jsonl` | 送信記録。1 実行・1 写真ごとに 1 行の JSON です（0600） |
 | `item-cache.json` | 写真ごとの原本 MD5 / SHA-256 / バイト数と前回の結果（`sent` / `duplicateRemote` / `checkedNotOnDrive` / `failed`、Drive fileId、フォルダ ID、日時）。キーは `localIdentifier`（0600、アトミック書き込み） |
+| `quality-cache.json` | 512 px サムネイルから計算した pHash と品質指標（鮮明度・露出・コントラスト等）のキャッシュ。`localIdentifier` をキーに、`originalFilename`・`uti`・解像度・更新タイムスタンプ・アルゴリズム版で無効化（format v2、0600） |
+| `place-cache.json` | 小数第 3 位（約 100 m 精度）に丸めた座標キー `ja:lat,lon` ごとの逆ジオコーディング地名キャッシュ（0600） |
 
 ### item-cache.json（結果キャッシュ）
 

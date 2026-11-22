@@ -28,15 +28,19 @@ apps/GeoFrameUploader/
       SendRunState.swift        送信モーダル用の進行状態ステートマシン（純粋型）
       RecordStore.swift         records.jsonl へのアトミック行追記（0600）
       ResultCache.swift         item-cache.json 管理・records.jsonl 増分取り込み・プロセス間マージ
+      PhotoSectioner.swift      撮影時刻ギャップ + Haversine 距離（実 GPS のみ）によるセクション分割
+      PlaceNameResolver.swift   CLGeocoder 直列キュー + place-cache.json（約 100 m 丸め座標キャッシュ、0600）
+      ImageQuality.swift        512px ガンマ 2.2 グレースケール解析（pHash / 画質指標）+ quality-cache.json（0600）
+      SimilarityGrouper.swift   セクション内 UnionFind 類似クラスタリング・推奨選出・Shift 範囲計算
       UploaderService.swift     GUI と CLI が共有する actor 窓口
     GeoFrameUploader/           実行ターゲット（--cli 引数の有無で CLI / SwiftUI を分岐）
       Entry.swift               @main エントリポイント
       UploaderApp.swift         SwiftUI App・ウィンドウ設定
-      AppModel.swift            @MainActor の画面状態・自動重複確認デバウンス・送信制御
+      AppModel.swift            @MainActor の画面状態・自動重複確認デバウンス・バックグラウンド解析世代管理・送信制御
       ThumbnailCache.swift      一覧/大型サムネイルのメモリキャッシュ
       CLI.swift                 --cli サブコマンド実装
-      Views/                    HeaderView / BannerView / DateFilterView / PhotoGridView / PhotoCell / ActionBarView / SendPanelView / ContentView
-  Tests/UploaderCoreTests/      URLProtocol スタブを用いた単体テスト群
+      Views/                    HeaderView / BannerView / DateFilterView / PhotoGridView / PhotoCell / SimilarCompareView / ActionBarView / SendPanelView / ContentView
+  Tests/UploaderCoreTests/      URLProtocol スタブを用いた単体テスト群 & v0.2 選択・品質・地名解決テスト群
 ```
 
 ## 2. 原本抽出と対象形式の判定
@@ -101,3 +105,15 @@ apps/GeoFrameUploader/
 - `ResultCache` は起動時・読み込み時・重複確認/送信/`scan` の開始時に `refresh()` を呼び、**ウォーターマーク（`byteOffset`・inode・デバイス番号・直前末尾 256 バイトの MD5）** を使って `records.jsonl` の未取り込み追記分だけを取り込みます（ファイルが縮んだ場合や置き換わった場合は先頭から再構築）。
 - 既に MD5 がキャッシュされており、かつ `originalFilename` と `uti` が現在のアセットと一致する場合は、原本の書き出し（および iCloud からのダウンロード）を省略して高速に重複判定・確認を行います。
 - 保存時は直前にディスク上の `item-cache.json` を読み直してエントリ単位（更新日時の新しい方優先）でマージし、アトミック書き込みを行います。ファイルが破損していた場合は `.corrupt-<timestamp>` へ退避し、`records.jsonl` から自動復旧します。
+
+## 6. 場所・時間枠グルーピングと類似・品質解析（v0.2）
+
+v0.2 では iCloud 上の原本ダウンロードを伴わない選択支援として、メタデータと 512 px サムネイルのみを使う 3 段階パイプラインを備えています。詳しいアルゴリズムや境界条件は [v0.2 写真選択・グルーピング・品質解析設計書](DESIGN-v0.2-selection.md) を参照してください。
+
+1. **場所 × 時間枠グルーピング（`PhotoSectioner` & `PlaceNameResolver`）**:
+   - 読み込み全件を `(creationDate, localIdentifier)` 順で走査し、撮影間隔（15 / 30 / 60 分）または実 GPS 同士の Haversine 距離（100 m / 300 m / 1 km、`horizontalAccuracy` 考慮）でセクション分割します。GPS が無いセクションのみ表示用として前後 2 時間以内の最近傍実 GPS を一時借用します。
+   - 「地名を表示」オン時は、代表座標を小数第 3 位（約 100 m 精度）に丸めた値だけを `CLGeocoder` 直列キュー（間隔 300 ms・キャンセル時は世代ガードで遅延応答破棄）へ渡し、結果を `place-cache.json`（`0600`）に保存します。
+2. **サムネイル並列品質解析（`ImageQualityAnalyzer` & `QualityCache`）**:
+   - 512 px 以下のガンマ 2.2 グレースケール画像から 64-bit pHash（32×32 → 8×8 Type-II DCT）と画質指標（鮮明度・露出・コントラスト・白飛び/黒つぶれ）を算出し、`item-cache.json` とは分離した `quality-cache.json`（format v2、`0600`）へバッチ保存します。
+3. **セクション内類似クラスタリングと推奨選出（`SimilarityGrouper` & `SelectionPlanner`）**:
+   - 各セクション内で同じ `burstIdentifier`、または 3 分以内かつ pHash ハミング距離 12 以下の写真を `UnionFind` で束ね、`isFavorite` 最優先・`rank_metrics` 重み（鮮明度 0.62・露出 0.25・コントラスト 0.13・クリッピング減点）で順位付けし、「推奨を自動選択」「推奨を選択」「見比べて選ぶ」モーダルおよび `Shift + クリック` 範囲選択へ供給します。

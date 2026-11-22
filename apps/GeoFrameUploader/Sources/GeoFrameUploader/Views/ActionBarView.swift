@@ -14,6 +14,7 @@ struct ActionBarView: View {
             Text("選択 \(model.selection.count) 件")
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+                .help("Shift+クリックで表示中の写真を範囲選択できます")
             Toggle("送信済み・重複を隠す", isOn: $model.hideDone)
                 .toggleStyle(.checkbox)
                 .fixedSize()

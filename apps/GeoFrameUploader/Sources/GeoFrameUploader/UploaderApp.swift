@@ -61,7 +61,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if terminationPending { return .terminateCancel }   // 既に終了待ち（そちらの返事で終了する）
-        guard model.hasActiveWork else { return .terminateNow }
+        guard model.hasActiveWork else {
+            model.cancelBackgroundWorkForImmediateTerminate()
+            return .terminateNow
+        }
         if model.needsQuitConfirmation {
             guard confirmStopAndQuit() else {
                 // 続ける。閉じられてしまったウィンドウがあれば出し直す（最後のウィンドウを閉じて終了に来た場合）

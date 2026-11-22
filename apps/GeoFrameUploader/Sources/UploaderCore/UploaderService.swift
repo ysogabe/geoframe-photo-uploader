@@ -25,6 +25,8 @@ public actor UploaderService {
     private let log: @Sendable (String) -> Void
     private var auth: GoogleAuth?
     private var injectedCache: ResultCache?
+    private var injectedQualityCache: QualityCache?
+    private var injectedPlaceResolver: PlaceNameResolver?
     /// 自動重複確認で使い回す Drive フォルダ一覧（送信後・ログアウトで捨てる）
     private var listing: RemoteListingSnapshot? { didSet { if listing == nil { listingGeneration &+= 1 } } }
     private var listingGeneration = 0
@@ -195,6 +197,61 @@ public actor UploaderService {
 
     public func thumbnail(localIdentifier: String, size: CGSize) async -> CGImage? {
         await PhotoLibrary.shared.thumbnailCGImage(for: localIdentifier, size: size)
+    }
+
+    // MARK: 品質解析・類似グルーピング・地名解決
+
+    public func qualityCache() -> QualityCache {
+        if let injectedQualityCache { return injectedQualityCache }
+        try? paths.ensureBaseDir()
+        let qc = QualityCache(fileURL: paths.qualityCacheFile, log: log)
+        injectedQualityCache = qc
+        return qc
+    }
+
+    public func cachedQuality(for items: [PhotoItem]) -> [String: QualityMetrics] {
+        qualityCache().metrics(for: items)
+    }
+
+    /// 512px サムネイルを取得して pHash と画質指標を算出する（GUI の ThumbnailCache には載せない）。
+    public func analyzeQuality(for item: PhotoItem) async -> QualityMetrics? {
+        guard !Task.isCancelled else { return nil }
+        guard let cg = await PhotoLibrary.shared.analysisCGImage(
+            for: item.localIdentifier,
+            maxDimension: ImageQualityAnalyzer.metricMaxPx
+        ) else {
+            return nil
+        }
+        guard !Task.isCancelled else { return nil }
+        return ImageQualityAnalyzer.analyze(cg)
+    }
+
+    public func saveQualityBatch(_ pairs: [(item: PhotoItem, metrics: QualityMetrics)]) {
+        qualityCache().recordBatch(pairs)
+    }
+
+    public func placeResolver() -> PlaceNameResolver {
+        if let injectedPlaceResolver { return injectedPlaceResolver }
+        try? paths.ensureBaseDir()
+        let resolver = PlaceNameResolver(fileURL: paths.placeCacheFile, log: log)
+        injectedPlaceResolver = resolver
+        return resolver
+    }
+
+    public func cachedPlaceName(for location: PhotoLocation) async -> String? {
+        await placeResolver().cachedName(for: location)
+    }
+
+    public func resolvePlaceName(for location: PhotoLocation) async -> String? {
+        await placeResolver().resolve(location: location)
+    }
+
+    public func resolvePlaceOutcome(for location: PhotoLocation) async -> GeocodingResult {
+        await placeResolver().resolveOutcome(location: location)
+    }
+
+    public func cancelPlaceResolution() async {
+        await injectedPlaceResolver?.cancelAll()
     }
 
     // MARK: 自動重複確認

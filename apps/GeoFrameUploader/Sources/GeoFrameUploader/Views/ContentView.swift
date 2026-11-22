@@ -8,8 +8,8 @@ struct ContentView: View {
     var body: some View {
         ZStack {
             mainContent
-                .disabled(model.showSendPanel)
-                .accessibilityHidden(model.showSendPanel)
+                .disabled(model.showSendPanel || model.showComparePanel)
+                .accessibilityHidden(model.showSendPanel || model.showComparePanel)
             if model.showSendPanel {
                 // 一覧を触れないように覆う（送信中・結果表示中）
                 Color.black.opacity(0.4)
@@ -21,9 +21,20 @@ struct ContentView: View {
                     .padding(24)
                     .transition(.scale(scale: 0.96).combined(with: .opacity))
                     .zIndex(1)
+            } else if model.showComparePanel, let cluster = model.comparingCluster {
+                Color.black.opacity(0.42)
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture { model.closeComparison() }
+                    .transition(.opacity)
+                SimilarCompareView(cluster: cluster, editableIds: model.comparingEditableIds)
+                    .padding(20)
+                    .transition(.scale(scale: 0.96).combined(with: .opacity))
+                    .zIndex(1)
             }
         }
         .animation(.easeInOut(duration: 0.15), value: model.showSendPanel)
+        .animation(.easeInOut(duration: 0.15), value: model.showComparePanel)
         .task { await model.refreshStatus() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { await model.refreshStatus() }

@@ -216,7 +216,7 @@ private struct SummaryPane: View {
 // MARK: - サムネイル
 
 /// 処理中の写真（大きめのサムネイルを取り直す。届くまでは一覧用の小さい方を出す）。
-private struct LargeThumbnail: View {
+struct LargeThumbnail: View {
     let item: PhotoItem
     let thumbnails: ThumbnailCache
     @State private var image: NSImage?

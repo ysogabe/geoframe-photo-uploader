@@ -361,7 +361,7 @@ public final class ResultCache: @unchecked Sendable {
     }()
 
     /// 同じディレクトリに 0600 で一時ファイルを作り、rename で置き換える。
-    static func atomicWrite0600(_ data: Data, to url: URL) throws {
+    static func atomicWrite0600(_ data: Data, to url: URL, label: String = "item-cache.json") throws {
         let dir = url.deletingLastPathComponent()
         if !FileManager.default.fileExists(atPath: dir.path) {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true,
@@ -369,7 +369,7 @@ public final class ResultCache: @unchecked Sendable {
         }
         let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
         let fd = open(tmp.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
-        guard fd >= 0 else { throw DriveError.fileIO("item-cache.json: \(String(cString: strerror(errno)))") }
+        guard fd >= 0 else { throw DriveError.fileIO("\(label): \(String(cString: strerror(errno)))") }
         var ok = false
         defer { if !ok { unlink(tmp.path) } }
         do {
@@ -381,7 +381,7 @@ public final class ResultCache: @unchecked Sendable {
                     let n = write(fd, buf.baseAddress! + off, buf.count - off)
                     if n < 0 {
                         if errno == EINTR { continue }
-                        throw DriveError.fileIO("item-cache.json: \(String(cString: strerror(errno)))")
+                        throw DriveError.fileIO("\(label): \(String(cString: strerror(errno)))")
                     }
                     off += n
                 }
@@ -389,7 +389,7 @@ public final class ResultCache: @unchecked Sendable {
             _ = fsync(fd)
         }
         guard rename(tmp.path, url.path) == 0 else {
-            throw DriveError.fileIO("item-cache.json: \(String(cString: strerror(errno)))")
+            throw DriveError.fileIO("\(label): \(String(cString: strerror(errno)))")
         }
         ok = true
     }

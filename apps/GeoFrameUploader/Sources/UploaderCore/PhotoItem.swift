@@ -31,11 +31,13 @@ public struct PhotoItem: Codable, Sendable, Equatable, Identifiable {
     public var hasAdjustments: Bool
     public var mediaSubtypesRaw: UInt
     public var eligibility: Eligibility
+    public var modificationDate: Date?
 
     public init(localIdentifier: String, originalFilename: String?, uti: String?, mediaKind: MediaKind,
                 creationDate: Date?, location: PhotoLocation? = nil, pixelWidth: Int = 0, pixelHeight: Int = 0,
                 burstIdentifier: String? = nil, isFavorite: Bool = false, isLivePhoto: Bool = false,
-                hasAdjustments: Bool = false, mediaSubtypesRaw: UInt = 0, eligibility: Eligibility? = nil) {
+                hasAdjustments: Bool = false, mediaSubtypesRaw: UInt = 0, eligibility: Eligibility? = nil,
+                modificationDate: Date? = nil) {
         self.localIdentifier = localIdentifier
         self.originalFilename = originalFilename
         self.uti = uti
@@ -50,6 +52,7 @@ public struct PhotoItem: Codable, Sendable, Equatable, Identifiable {
         self.hasAdjustments = hasAdjustments
         self.mediaSubtypesRaw = mediaSubtypesRaw
         self.eligibility = eligibility ?? EligibilityClassifier.classify(mediaKind: mediaKind, photoResourceUTI: uti)
+        self.modificationDate = modificationDate
     }
 
     /// Drive 上のファイル名（原本ファイル名そのまま）。

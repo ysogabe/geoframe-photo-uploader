@@ -1,5 +1,6 @@
 .build/
 *.app/
+*.dmg
 .DS_Store
 tools/md5-precheck/out/
 .serena/
@@ -10,6 +11,8 @@ oauth-client.json
 client_secret*.json
 records.jsonl
 item-cache.json
+quality-cache.json
+place-cache.json
 .env*
 
 # SwiftPM / Xcode のローカル状態

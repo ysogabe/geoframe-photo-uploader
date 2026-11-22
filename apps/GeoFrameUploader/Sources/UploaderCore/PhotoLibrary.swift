@@ -136,7 +136,8 @@ public final class PhotoLibrary: @unchecked Sendable {
             isFavorite: asset.isFavorite,
             isLivePhoto: asset.mediaSubtypes.contains(.photoLive),
             hasAdjustments: adjusted,
-            mediaSubtypesRaw: asset.mediaSubtypes.rawValue
+            mediaSubtypesRaw: asset.mediaSubtypes.rawValue,
+            modificationDate: asset.modificationDate
         )
     }
 
@@ -144,26 +145,48 @@ public final class PhotoLibrary: @unchecked Sendable {
 
     /// サムネイルを非同期に取得（iCloud からの取得も許可）。見つからなければ nil。
     public func thumbnail(for localIdentifier: String, size: CGSize) async -> NSImage? {
-        guard let asset = asset(for: localIdentifier) else { return nil }
-        let opts = PHImageRequestOptions()
-        opts.deliveryMode = .highQualityFormat
-        opts.resizeMode = .fast
-        opts.isNetworkAccessAllowed = true
-        opts.isSynchronous = false
-        return await withCheckedContinuation { (cont: CheckedContinuation<NSImage?, Never>) in
-            let once = OnceFlag()
-            imageManager.requestImage(for: asset, targetSize: size, contentMode: .aspectFill, options: opts) { image, info in
-                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if degraded && image != nil { return }
-                if once.fire() { cont.resume(returning: image) }
-            }
-        }
+        await requestImage(for: localIdentifier, size: size, contentMode: .aspectFill, resizeMode: .fast)
     }
 
     public func thumbnailCGImage(for localIdentifier: String, size: CGSize) async -> CGImage? {
         guard let img = await thumbnail(for: localIdentifier, size: size) else { return nil }
         var rect = CGRect(origin: .zero, size: img.size)
         return img.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+    }
+
+    /// 品質解析・pHash 用にアスペクト比を維持したまま長辺 `maxDimension` 相当の画像を取得する。
+    /// キャンセル時は `PHImageManager` のリクエストを中止する。
+    public func analysisCGImage(for localIdentifier: String, maxDimension: Int = 512) async -> CGImage? {
+        let size = CGSize(width: maxDimension, height: maxDimension)
+        guard let img = await requestImage(for: localIdentifier, size: size, contentMode: .aspectFit, resizeMode: .exact) else {
+            return nil
+        }
+        var rect = CGRect(origin: .zero, size: img.size)
+        return img.cgImage(forProposedRect: &rect, context: nil, hints: nil)
+    }
+
+    private func requestImage(for localIdentifier: String, size: CGSize,
+                              contentMode: PHImageContentMode, resizeMode: PHImageRequestOptionsResizeMode) async -> NSImage? {
+        guard let asset = asset(for: localIdentifier) else { return nil }
+        let opts = PHImageRequestOptions()
+        opts.deliveryMode = .highQualityFormat
+        opts.resizeMode = resizeMode
+        opts.isNetworkAccessAllowed = true
+        opts.isSynchronous = false
+        let reqHolder = RequestIDHolder()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (cont: CheckedContinuation<NSImage?, Never>) in
+                let once = OnceFlag()
+                let rid = imageManager.requestImage(for: asset, targetSize: size, contentMode: contentMode, options: opts) { image, info in
+                    let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                    if degraded && image != nil { return }
+                    if once.fire() { cont.resume(returning: image) }
+                }
+                reqHolder.set(rid, manager: imageManager)
+            }
+        } onCancel: {
+            reqHolder.cancel()
+        }
     }
 
     public func startCaching(localIdentifiers: [String], size: CGSize) {
@@ -185,5 +208,35 @@ final class OnceFlag: @unchecked Sendable {
         if fired { return false }
         fired = true
         return true
+    }
+}
+
+/// `PHImageManager` のリクエスト ID を保持し、キャンセル時に取り消す。
+final class RequestIDHolder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var id: PHImageRequestID = PHInvalidImageRequestID
+    private weak var manager: PHImageManager?
+    private var cancelled = false
+
+    func set(_ id: PHImageRequestID, manager: PHImageManager) {
+        lock.lock()
+        self.id = id
+        self.manager = manager
+        let shouldCancel = cancelled
+        lock.unlock()
+        if shouldCancel && id != PHInvalidImageRequestID {
+            manager.cancelImageRequest(id)
+        }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        let id = self.id
+        let manager = self.manager
+        lock.unlock()
+        if id != PHInvalidImageRequestID {
+            manager?.cancelImageRequest(id)
+        }
     }
 }

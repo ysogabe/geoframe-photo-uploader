@@ -8,6 +8,12 @@ enum DateMode: String, CaseIterable, Identifiable {
     var id: Self { self }
 }
 
+enum GroupingMode: String, CaseIterable, Identifiable {
+    case sectioned = "場所・時間枠"
+    case flat = "フラット一覧"
+    var id: Self { self }
+}
+
 /// 送信中のアイテムの段階（UI 表示用。進捗は整数 % に丸めて再描画を抑える）。
 enum LivePhase: Equatable {
     case exporting
@@ -71,7 +77,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var cachedEntries: [String: CacheEntry] = [:]
     /// 「送信済み・重複を隠す」
     @Published var hideDone = false {
-        didSet { if hideDone { pruneHiddenSelection() } }
+        didSet {
+            if hideDone { pruneHiddenSelection() }
+            invalidateShiftAnchorIfNeeded()
+        }
     }
 
     /// 隠れている（送信済み・重複とみなせる）写真を選択から外す。
@@ -123,6 +132,89 @@ final class AppModel: ObservableObject {
     /// 直前の送信を中止したか（パネルの結果表示用）
     @Published private(set) var runWasCancelled = false
 
+    // グルーピング・品質解析・地名解決（v0.2）
+    static let groupingModeKey = "groupingMode"
+    static let bundleSimilarKey = "bundleSimilarPhotos"
+    static let timeGapMinutesKey = "sectionTimeGapMinutes"
+    static let distanceMetersKey = "sectionDistanceMeters"
+    static let geocodeEnabledKey = "sectionGeocodeEnabled"
+
+    @Published var groupingMode: GroupingMode = GroupingMode(
+        rawValue: UserDefaults.standard.string(forKey: AppModel.groupingModeKey) ?? ""
+    ) ?? .sectioned {
+        didSet {
+            guard groupingMode != oldValue else { return }
+            UserDefaults.standard.set(groupingMode.rawValue, forKey: Self.groupingModeKey)
+            recomputeGroupings()
+        }
+    }
+
+    @Published var bundleSimilar: Bool = (UserDefaults.standard.object(forKey: AppModel.bundleSimilarKey) as? Bool) ?? true {
+        didSet {
+            guard bundleSimilar != oldValue else { return }
+            UserDefaults.standard.set(bundleSimilar, forKey: Self.bundleSimilarKey)
+        }
+    }
+
+    @Published var timeGapMinutes: Int = {
+        let v = UserDefaults.standard.integer(forKey: AppModel.timeGapMinutesKey)
+        return [15, 30, 60].contains(v) ? v : 30
+    }() {
+        didSet {
+            guard timeGapMinutes != oldValue else { return }
+            UserDefaults.standard.set(timeGapMinutes, forKey: Self.timeGapMinutesKey)
+            collapsedSectionIds = []
+            recomputeSections()
+            recomputeGroupings()
+            schedulePlaceResolution(generation: analysisGeneration)
+        }
+    }
+
+    @Published var distanceThresholdMeters: Int = {
+        let v = UserDefaults.standard.integer(forKey: AppModel.distanceMetersKey)
+        return [100, 300, 1000].contains(v) ? v : 300
+    }() {
+        didSet {
+            guard distanceThresholdMeters != oldValue else { return }
+            UserDefaults.standard.set(distanceThresholdMeters, forKey: Self.distanceMetersKey)
+            collapsedSectionIds = []
+            recomputeSections()
+            recomputeGroupings()
+            schedulePlaceResolution(generation: analysisGeneration)
+        }
+    }
+
+    @Published var geocodeEnabled: Bool = (UserDefaults.standard.object(forKey: AppModel.geocodeEnabledKey) as? Bool) ?? true {
+        didSet {
+            guard geocodeEnabled != oldValue else { return }
+            UserDefaults.standard.set(geocodeEnabled, forKey: Self.geocodeEnabledKey)
+            if geocodeEnabled {
+                schedulePlaceResolution(generation: analysisGeneration)
+            } else {
+                placeDebounceTask?.cancel()
+                placeResolutionTask?.cancel()
+                Task { await service.cancelPlaceResolution() }
+            }
+        }
+    }
+
+    @Published private(set) var sections: [PhotoSection] = []
+    @Published private(set) var sectionGroupings: [String: SectionGroupingResult] = [:]
+    @Published private(set) var qualityMetrics: [String: QualityMetrics] = [:]
+    @Published private(set) var analysisProgress: (done: Int, total: Int)?
+    @Published var collapsedSectionIds: Set<String> = []
+    @Published private(set) var placeNames: [String: String] = [:]
+    @Published var comparingCluster: SimilarityCluster?
+    @Published private(set) var comparingEditableIds: [String] = []
+    private var lastClickedId: String?
+
+    private var loadGeneration = 0
+    private var isTerminating = false
+    private var analysisGeneration = 0
+    private var analysisTask: Task<Void, Never>?
+    private var placeDebounceTask: Task<Void, Never>?
+    private var placeResolutionTask: Task<Void, Never>?
+
     // 確認ダイアログ（20 件超）
     @Published var showSendConfirm = false
     @Published private(set) var pendingSend: [PhotoItem] = []
@@ -157,6 +249,84 @@ final class AppModel: ObservableObject {
     var visibleItems: [PhotoItem] { hideDone ? items.filter { !isDone($0) } : items }
     var hiddenCount: Int { items.count - visibleItems.count }
     var previouslySentCount: Int { items.filter { cachedStatus(for: $0)?.lastStatus == .sent }.count }
+    var isAnalysisComplete: Bool { hasLoaded && analysisProgress == nil }
+    var showComparePanel: Bool { comparingCluster != nil && !showSendPanel }
+
+    var sectionOptions: SectionOptions {
+        SectionOptions(
+            timeGapSeconds: TimeInterval(timeGapMinutes * 60),
+            distanceThresholdMeters: Double(distanceThresholdMeters)
+        )
+    }
+
+    var similarClusterCount: Int {
+        sections.reduce(0) { $0 + (sectionGroupings[$1.id]?.clusters.count ?? 0) }
+    }
+
+    var recommendedAllIds: Set<String> {
+        var out = Set<String>()
+        for sec in sections {
+            let grp = sectionGroupings[sec.id] ?? .empty
+            out.formUnion(SelectionPlanner.recommendedToSelect(items: sec.items, grouping: grp, isDone: isDone))
+        }
+        return out
+    }
+
+    func visibleItems(in section: PhotoSection) -> [PhotoItem] {
+        hideDone ? section.items.filter { !isDone($0) } : section.items
+    }
+
+    func grouping(for sectionId: String) -> SectionGroupingResult {
+        sectionGroupings[sectionId] ?? .empty
+    }
+
+    func ranking(for itemId: String, in sectionId: String?) -> RankedMember? {
+        guard bundleSimilar, let sectionId else { return nil }
+        return sectionGroupings[sectionId]?.clusterByItemId[itemId]?.rankings[itemId]
+    }
+
+    func standaloneIssues(for itemId: String, in sectionId: String?) -> [String]? {
+        guard let sectionId else { return nil }
+        return sectionGroupings[sectionId]?.standaloneIssues[itemId]
+    }
+
+    func selectedCount(in section: PhotoSection) -> Int {
+        section.items.reduce(0) { $0 + (selection.contains($1.id) ? 1 : 0) }
+    }
+
+    func recommendedIds(in section: PhotoSection) -> Set<String> {
+        SelectionPlanner.recommendedToSelect(items: section.items, grouping: grouping(for: section.id), isDone: isDone)
+    }
+
+    func toggleSectionCollapsed(_ sectionId: String) {
+        if collapsedSectionIds.contains(sectionId) {
+            collapsedSectionIds.remove(sectionId)
+        } else {
+            collapsedSectionIds.insert(sectionId)
+        }
+        invalidateShiftAnchorIfNeeded()
+    }
+
+    /// 実際のグリッド描画順（類似クラスタ束ね反映済み）と一致する、選択可能な表示中 ID 一覧。
+    var orderedVisibleSelectableIds: [String] {
+        sections.flatMap { sec -> [String] in
+            if groupingMode == .sectioned && collapsedSectionIds.contains(sec.id) { return [] }
+            let vis = visibleItems(in: sec)
+            let chunks = SelectionPlanner.displayChunks(
+                items: vis,
+                grouping: grouping(for: sec.id),
+                bundleSimilar: bundleSimilar
+            )
+            return SelectionPlanner.orderedSelectableIds(from: chunks) { isSelectable($0) }
+        }
+    }
+
+    private func invalidateShiftAnchorIfNeeded() {
+        guard let anchor = lastClickedId else { return }
+        if !orderedVisibleSelectableIds.contains(anchor) {
+            lastClickedId = nil
+        }
+    }
 
     /// 現在の送信先フォルダについての前回の結果（無ければ nil）。
     func cachedStatus(for item: PhotoItem) -> CacheEntry? {
@@ -339,29 +509,47 @@ final class AppModel: ObservableObject {
     // MARK: 読み込み
 
     func load() {
-        guard !isBusy else { return }
+        guard !isBusy, !isTerminating else { return }
         let to = dateMode == .single ? fromDate : toDate
         let range = LocalTime.dayRange(from: fromDate, to: to)
         cancelAutoPrecheck()
+        cancelBackgroundAnalysis()
+        loadGeneration &+= 1
+        let loadGen = loadGeneration
         isLoading = true
         Task {
             defer { isLoading = false }
             do {
                 let loaded = try await service.loadItems(start: range.start, end: range.end)
+                guard !isTerminating, loadGeneration == loadGen else { return }
                 cachedEntries = await service.cachedEntries(for: loaded)
+                let cachedQ = await service.cachedQuality(for: loaded)
+                guard !isTerminating, loadGeneration == loadGen else { return }
                 items = loaded
+                qualityMetrics = cachedQ
                 hasLoaded = true
                 cancelAutoPrecheck()
                 selection = []
+                lastClickedId = nil
+                collapsedSectionIds = []
+                closeComparison()
                 results = [:]
                 prechecks = [:]
                 livePhases = [:]
                 lastSummary = nil
                 lastRunItems = []
+                recomputeSections()
+                recomputeGroupings()
+                startBackgroundQualityAnalysis(generation: analysisGeneration, items: loaded, cached: cachedQ)
+                schedulePlaceResolution(generation: analysisGeneration)
             } catch {
-                showError("写真を読み込めませんでした", error)
+                if !isTerminating && loadGeneration == loadGen {
+                    showError("写真を読み込めませんでした", error)
+                }
             }
-            await refreshStatus()
+            if !isTerminating {
+                await refreshStatus()
+            }
         }
     }
 
@@ -369,20 +557,251 @@ final class AppModel: ObservableObject {
 
     func isSelectable(_ item: PhotoItem) -> Bool { item.eligibility.isEligible && !isBusy }
 
-    func toggle(_ item: PhotoItem) {
+    func toggle(_ item: PhotoItem, shiftPressed: Bool = false) {
         guard isSelectable(item) else { return }
+        if shiftPressed {
+            let ordered = orderedVisibleSelectableIds
+            let anchorValid = lastClickedId.map { ordered.contains($0) } ?? false
+            let anchorState = anchorValid ? selection.contains(lastClickedId!) : true
+            let next = SelectionPlanner.shiftRange(
+                orderedSelectableIds: ordered,
+                anchorId: lastClickedId,
+                targetId: item.id,
+                anchorTargetState: anchorState,
+                currentSelection: selection
+            )
+            selection = next
+            if !anchorValid { lastClickedId = item.id }
+            return
+        }
         if selection.contains(item.id) { selection.remove(item.id) } else { selection.insert(item.id) }
+        lastClickedId = item.id
     }
 
     func selectAll() {
         guard !isBusy else { return }
         // 送信済み・重複（Drive に既存）とみなせるものは選ばない（手動では選べる）
         selection = Set(visibleItems.filter { $0.eligibility.isEligible && !isDone($0) }.map(\.id))
+        lastClickedId = nil
     }
 
     func deselectAll() {
         guard !isBusy else { return }
         selection = []
+        lastClickedId = nil
+    }
+
+    func selectFavorites() {
+        guard !isBusy else { return }
+        selection = Set(visibleItems.filter { $0.eligibility.isEligible && $0.isFavorite && !isDone($0) }.map(\.id))
+        lastClickedId = nil
+        notifyLargeAutoPrecheckIfNeeded(count: selection.count)
+    }
+
+    func selectRecommendedAll() {
+        guard !isBusy, isAnalysisComplete else { return }
+        let rec = recommendedAllIds
+        selection = rec
+        lastClickedId = nil
+        notifyLargeAutoPrecheckIfNeeded(count: rec.count)
+    }
+
+    func selectRecommended(in section: PhotoSection) {
+        guard !isBusy, isAnalysisComplete else { return }
+        let ids = recommendedIds(in: section)
+        let addedCount = ids.subtracting(selection).count
+        selection.formUnion(ids)
+        notifyLargeAutoPrecheckIfNeeded(count: addedCount)
+    }
+
+    func selectAll(in section: PhotoSection) {
+        guard !isBusy else { return }
+        let ids = Set(visibleItems(in: section).filter { $0.eligibility.isEligible && !isDone($0) }.map(\.id))
+        let addedCount = ids.subtracting(selection).count
+        selection.formUnion(ids)
+        notifyLargeAutoPrecheckIfNeeded(count: addedCount)
+    }
+
+    func deselectAll(in section: PhotoSection) {
+        guard !isBusy else { return }
+        selection.subtract(section.items.map(\.id))
+    }
+
+    func editableIds(for cluster: SimilarityCluster, visibleMembers: [PhotoItem]) -> [String] {
+        let visibleSet = Set(visibleMembers.map(\.id))
+        return cluster.rankedOrder.filter { id in
+            guard visibleSet.contains(id), let item = items.first(where: { $0.id == id }) else { return false }
+            return isSelectable(item) && (!hideDone || !isDone(item))
+        }
+    }
+
+    func openComparison(cluster: SimilarityCluster, editableIds: [String]) {
+        guard !isBusy, !editableIds.isEmpty else { return }
+        comparingEditableIds = editableIds
+        comparingCluster = cluster
+    }
+
+    func closeComparison() {
+        comparingCluster = nil
+        comparingEditableIds = []
+    }
+
+    func applyClusterComparison(cluster: SimilarityCluster, editableIds: [String], selectedIds: Set<String>) {
+        guard !isBusy else { return }
+        let validEditable = Set(editableIds.filter { id in
+            guard let item = items.first(where: { $0.id == id }) else { return false }
+            return isSelectable(item) && (!hideDone || !isDone(item))
+        })
+        var next = selection
+        for id in validEditable {
+            if selectedIds.contains(id) { next.insert(id) } else { next.remove(id) }
+        }
+        selection = next
+        closeComparison()
+    }
+
+    private func notifyLargeAutoPrecheckIfNeeded(count: Int) {
+        if autoPrecheckEnabled && canAutoPrecheck && count > Self.confirmThreshold {
+            showBanner(.info, "\(count) 件を選択しました。自動重複確認を順次実行します（時間がかかる場合はオフにできます）。")
+        }
+    }
+
+    // MARK: セクション・類似グルーピング・地名解決
+
+    private func recomputeSections() {
+        sections = PhotoSectioner.section(items: items, options: sectionOptions)
+    }
+
+    /// 表示モード（フラット / セクション）に関わらず、常に場所・時間枠単位で類似判定と推奨順位を保つ。
+    private func recomputeGroupings() {
+        var map: [String: SectionGroupingResult] = [:]
+        for sec in sections {
+            map[sec.id] = SimilarityGrouper.group(
+                sectionId: sec.id,
+                sectionItems: sec.items,
+                metricsById: qualityMetrics
+            )
+        }
+        sectionGroupings = map
+    }
+
+    private func cancelBackgroundAnalysis() {
+        analysisGeneration &+= 1
+        analysisTask?.cancel()
+        analysisTask = nil
+        placeDebounceTask?.cancel()
+        placeDebounceTask = nil
+        placeResolutionTask?.cancel()
+        placeResolutionTask = nil
+        analysisProgress = nil
+        Task { await service.cancelPlaceResolution() }
+    }
+
+    private func startBackgroundQualityAnalysis(generation gen: Int, items: [PhotoItem],
+                                                cached: [String: QualityMetrics]) {
+        let targets = items.filter { $0.eligibility.isEligible && cached[$0.localIdentifier] == nil }
+        guard !targets.isEmpty else {
+            analysisProgress = nil
+            return
+        }
+        let total = targets.count
+        analysisProgress = (0, total)
+        let svc = service
+        analysisTask = Task { [weak self] in
+            var done = 0
+            var pendingSave: [(item: PhotoItem, metrics: QualityMetrics)] = []
+            var nextIdx = 0
+            let maxConcurrent = 4
+
+            await withTaskGroup(of: (PhotoItem, QualityMetrics?).self) { group in
+                while nextIdx < min(maxConcurrent, total) {
+                    let it = targets[nextIdx]
+                    nextIdx += 1
+                    group.addTask { (it, await svc.analyzeQuality(for: it)) }
+                }
+
+                while let (item, metrics) = await group.next() {
+                    if Task.isCancelled { break }
+                    done += 1
+                    if let metrics {
+                        pendingSave.append((item, metrics))
+                        await MainActor.run { [weak self] in
+                            guard let self, self.analysisGeneration == gen else { return }
+                            self.qualityMetrics[item.localIdentifier] = metrics
+                        }
+                    }
+                    let currentDone = done
+                    await MainActor.run { [weak self] in
+                        guard let self, self.analysisGeneration == gen else { return }
+                        self.analysisProgress = (currentDone, total)
+                        if currentDone % 8 == 0 { self.recomputeGroupings() }
+                    }
+                    if pendingSave.count >= 20 {
+                        let batch = pendingSave
+                        pendingSave = []
+                        await svc.saveQualityBatch(batch)
+                    }
+                    if nextIdx < total && !Task.isCancelled {
+                        let nextItem = targets[nextIdx]
+                        nextIdx += 1
+                        group.addTask { (nextItem, await svc.analyzeQuality(for: nextItem)) }
+                    }
+                }
+            }
+
+            if !pendingSave.isEmpty {
+                await svc.saveQualityBatch(pendingSave)
+            }
+            await MainActor.run { [weak self] in
+                guard let self, self.analysisGeneration == gen else { return }
+                self.analysisProgress = nil
+                self.analysisTask = nil
+                self.recomputeGroupings()
+            }
+        }
+    }
+
+    private func schedulePlaceResolution(generation gen: Int) {
+        placeDebounceTask?.cancel()
+        placeResolutionTask?.cancel()
+        guard geocodeEnabled, !sections.isEmpty else { return }
+
+        var uniqueCoords: [(key: String, loc: PhotoLocation)] = []
+        var seen = Set<String>()
+        for sec in sections {
+            guard let key = sec.locationKey, let loc = sec.representativeLocation,
+                  !seen.contains(key), placeNames[key] == nil else { continue }
+            seen.insert(key)
+            uniqueCoords.append((key, loc))
+        }
+        guard !uniqueCoords.isEmpty else { return }
+
+        let svc = service
+        placeDebounceTask = Task { [weak self] in
+            // 閾値変更の連打時は 200ms 待ってから問い合わせる
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run { [weak self] in
+                guard let self, self.analysisGeneration == gen else { return }
+                self.placeResolutionTask = Task { [weak self] in
+                    for (key, loc) in uniqueCoords {
+                        if Task.isCancelled { return }
+                        let outcome = await svc.resolvePlaceOutcome(for: loc)
+                        switch outcome {
+                        case .resolved(let name):
+                            await MainActor.run { [weak self] in
+                                guard let self, self.analysisGeneration == gen else { return }
+                                self.placeNames[key] = name
+                            }
+                        case .notFound:
+                            continue
+                        case .failed, .cancelled:
+                            return
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // MARK: 重複確認（送信しない）
@@ -467,6 +886,7 @@ final class AppModel: ObservableObject {
     private func startUpload(_ snapshot: [PhotoItem]) {
         guard canSend, !snapshot.isEmpty else { return }
         cancelAutoPrecheck()
+        closeComparison()
         isSending = true
         showSendPanel = true
         runError = nil
@@ -579,16 +999,25 @@ final class AppModel: ObservableObject {
         isSending ? "送信中です。中止して終了しますか？" : "重複を確認中です。中止して終了しますか？"
     }
 
+    func cancelBackgroundWorkForImmediateTerminate() {
+        isTerminating = true
+        loadGeneration &+= 1
+        cancelBackgroundAnalysis()
+    }
+
     /// 終了のため、実行中の送信・重複確認を中止し、終わる（記録の書き込みと一時ファイルの削除）まで最大 `timeout` 秒待つ。
     /// 時間内に終わったら真。
     @discardableResult
     func stopForTermination(timeout: TimeInterval = 15) async -> Bool {
+        isTerminating = true
+        loadGeneration &+= 1
         let upload = uploadSummaryTask
         let pre = precheckTask
         let autoItem = autoItemTask
         let autoWorker = autoWorkerTask
         if upload != nil || pre != nil { cancelRun() }
         cancelAutoPrecheck()
+        cancelBackgroundAnalysis()
         let finished = await Self.wait(timeout: timeout) {
             _ = try? await upload?.value
             await pre?.value
