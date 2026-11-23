@@ -27,7 +27,7 @@ apps/GeoFrameUploader/
       AutoPrecheck.swift        選択時の自動重複確認キュー・セッション一覧スナップショット
       SendRunState.swift        送信モーダル用の進行状態ステートマシン（純粋型）
       RecordStore.swift         records.jsonl へのアトミック行追記（0600）
-      ResultCache.swift         item-cache.json 管理・records.jsonl 増分取り込み・プロセス間マージ
+      ResultCache.swift         item-cache.json 管理・records.jsonl 増分取り込み・プロセス間マージ・カレンダー日別履歴集計
       PhotoSectioner.swift      撮影時刻ギャップ + Haversine 距離（実 GPS のみ）によるセクション分割
       PlaceNameResolver.swift   CLGeocoder 直列キュー + place-cache.json（約 100 m 丸め座標キャッシュ、0600）
       ImageQuality.swift        512px ガンマ 2.2 グレースケール解析（pHash / 画質指標）+ quality-cache.json（0600）
@@ -104,6 +104,7 @@ apps/GeoFrameUploader/
 - `records.jsonl` は 1 枚処理するごとに `O_WRONLY | O_CREAT | O_APPEND`（`0600`）で 1 行 JSON を追記します。
 - `ResultCache` は起動時・読み込み時・重複確認/送信/`scan` の開始時に `refresh()` を呼び、**ウォーターマーク（`byteOffset`・inode・デバイス番号・直前末尾 256 バイトの MD5）** を使って `records.jsonl` の未取り込み追記分だけを取り込みます（ファイルが縮んだ場合や置き換わった場合は先頭から再構築）。
 - 既に MD5 がキャッシュされており、かつ `originalFilename` と `uti` が現在のアセットと一致する場合は、原本の書き出し（および iCloud からのダウンロード）を省略して高速に重複判定・確認を行います。
+- `CacheEntry` には撮影日時（`creationDate`）も保持し、起動時・読み込み時・確認/送信完了時に `dayHistories(forFolder:calendar:)`（`CalendarDayHistory`）を集計して 2 ヶ月見開きカレンダーへ履歴バッジを表示します。既存キャッシュで `creationDate` が欠損しているエントリは、`records.jsonl` および写真ライブラリが `.authorized` のときの PhotoKit（`PHAsset.fetchAssets(withLocalIdentifiers:)`）からダイアログを出さずに自動補完します。
 - 保存時は直前にディスク上の `item-cache.json` を読み直してエントリ単位（更新日時の新しい方優先）でマージし、アトミック書き込みを行います。ファイルが破損していた場合は `.corrupt-<timestamp>` へ退避し、`records.jsonl` から自動復旧します。
 
 ## 6. 場所・時間枠グルーピングと類似・品質解析（v0.2）

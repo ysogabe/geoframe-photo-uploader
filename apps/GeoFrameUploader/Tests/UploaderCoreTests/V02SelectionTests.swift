@@ -401,4 +401,102 @@ final class V02SelectionTests: XCTestCase {
         let attrs = try FileManager.default.attributesOfItem(atPath: cacheURL.path)
         XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
     }
+
+    // MARK: - DateRangePreset & Calendar Grid
+
+    func testDateRangePresetsInclusiveDaysAndTwoMonthGrid() throws {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+        let now = try XCTUnwrap(cal.date(from: DateComponents(year: 2026, month: 11, day: 23, hour: 15, minute: 30)))
+
+        let r7 = DateRangePreset.last7Days.dateRange(now: now, calendar: cal)
+        XCTAssertEqual(LocalTime.inclusiveDayCount(from: r7.from, to: r7.to, calendar: cal), 7)
+        XCTAssertEqual(cal.dateComponents([.year, .month, .day], from: r7.from), DateComponents(year: 2026, month: 11, day: 17))
+        XCTAssertEqual(cal.dateComponents([.year, .month, .day], from: r7.to), DateComponents(year: 2026, month: 11, day: 23))
+        XCTAssertEqual(DateRangePreset.matching(from: r7.from, to: r7.to, now: now, calendar: cal), .last7Days)
+
+        let rToday = DateRangePreset.today.dateRange(now: now, calendar: cal)
+        XCTAssertEqual(LocalTime.inclusiveDayCount(from: rToday.from, to: rToday.to, calendar: cal), 1)
+        XCTAssertEqual(DateRangePreset.matching(from: rToday.from, to: rToday.to, now: now, calendar: cal), .today)
+
+        let rLastMonth = DateRangePreset.lastMonth.dateRange(now: now, calendar: cal)
+        XCTAssertEqual(cal.dateComponents([.year, .month, .day], from: rLastMonth.from), DateComponents(year: 2026, month: 10, day: 1))
+        XCTAssertEqual(cal.dateComponents([.year, .month, .day], from: rLastMonth.to), DateComponents(year: 2026, month: 10, day: 31))
+        XCTAssertEqual(LocalTime.inclusiveDayCount(from: rLastMonth.from, to: rLastMonth.to, calendar: cal), 31)
+        XCTAssertEqual(DateRangePreset.matching(from: rLastMonth.from, to: rLastMonth.to, now: now, calendar: cal), .lastMonth)
+
+        let novGrid = LocalTime.monthGrid(forMonth: now, calendar: cal)
+        XCTAssertEqual(novGrid.count, 42)
+        XCTAssertEqual(novGrid.filter(\.isCurrentMonth).count, 30)
+        XCTAssertEqual(novGrid[0].dayNumber, 1)
+        XCTAssertTrue(novGrid[0].isCurrentMonth)
+        XCTAssertEqual(novGrid[0].weekday, 1)
+
+        let octMonth = LocalTime.addingMonths(-1, to: now, calendar: cal)
+        let octGrid = LocalTime.monthGrid(forMonth: octMonth, calendar: cal)
+        XCTAssertEqual(octGrid.count, 42)
+        XCTAssertEqual(octGrid.filter(\.isCurrentMonth).count, 31)
+        XCTAssertFalse(octGrid[3].isCurrentMonth)
+        XCTAssertTrue(octGrid[4].isCurrentMonth)
+        XCTAssertEqual(octGrid[4].dayNumber, 1)
+        XCTAssertEqual(octGrid[4].weekday, 5)
+    }
+
+    func testResultCacheCalendarDayHistoriesAndCreationDateBackfill() throws {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Asia/Tokyo")!
+
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("rch-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let cacheURL = dir.appendingPathComponent("item-cache.json")
+        let recURL = dir.appendingPathComponent("records.jsonl")
+
+        let d1Morning = try XCTUnwrap(cal.date(from: DateComponents(year: 2025, month: 8, day: 15, hour: 9)))
+        let d1Night = try XCTUnwrap(cal.date(from: DateComponents(year: 2025, month: 8, day: 15, hour: 21)))
+        let d2 = try XCTUnwrap(cal.date(from: DateComponents(year: 2025, month: 8, day: 16, hour: 12)))
+        let d3 = try XCTUnwrap(cal.date(from: DateComponents(year: 2025, month: 9, day: 2, hour: 14)))
+
+        let pSent = makeItem("s1", date: d1Morning)
+        let pDup = makeItem("d1", date: d1Night)
+        let pChecked = makeItem("c1", date: d2)
+        let pFailed = makeItem("f1", date: d3)
+        let pOtherFolder = makeItem("o1", date: d2)
+
+        // 古い形式（creationDate 欠損）のキャッシュと records.jsonl からの自動補完を検証
+        let oldCache = ResultCache(fileURL: cacheURL)
+        oldCache.recordStatus(item: PhotoItem(localIdentifier: "s1", originalFilename: pSent.originalFilename, uti: pSent.uti, mediaKind: .image, creationDate: nil),
+                              status: .sent, driveFileId: "F1", folderId: "FOLD1", md5: "aaa")
+        oldCache.recordStatus(item: PhotoItem(localIdentifier: "c1", originalFilename: pChecked.originalFilename, uti: pChecked.uti, mediaKind: .image, creationDate: nil),
+                              status: .checkedNotOnDrive, driveFileId: nil, folderId: "FOLD1", md5: "ccc")
+        oldCache.recordStatus(item: pOtherFolder, status: .sent, driveFileId: "FOTHER", folderId: "FOLD2", md5: "ooo")
+
+        let records = RecordStore(fileURL: recURL)
+        try records.append(UploadRecord(runId: "R1", item: pSent, exported: nil, result: .sent, driveFileId: "F1",
+                                        verified: true, folderId: "FOLD1"))
+        try records.append(UploadRecord(runId: "R1", item: pDup, exported: nil, result: .skippedDuplicate,
+                                        folderId: "FOLD1"))
+        try records.append(UploadRecord(runId: "R2", item: pFailed,
+                                        exported: ExportedOriginal(fileURL: dir.appendingPathComponent("tmp"), byteCount: 10, md5Hex: "fff", sha256Hex: "sss", dataSource: .local, exif: nil),
+                                        result: .failed, error: "err", folderId: "FOLD1"))
+
+        // records.jsonl から s1 の creationDate を補完し、d1・f1 も取り込まれる
+        let cache = ResultCache(fileURL: cacheURL, records: records)
+        XCTAssertEqual(cache.missingCreationDateIds(), ["c1"])
+
+        // 事前確認のみ（records.jsonl に無い c1）を外部から日付補完
+        cache.backfillCreationDates(["c1": d2])
+        XCTAssertTrue(cache.missingCreationDateIds().isEmpty)
+
+        // 別インスタンスで再読み込みしても永続化されていること
+        let reloaded = ResultCache(fileURL: cacheURL, records: records)
+        let hist = reloaded.dayHistories(forFolder: "FOLD1", calendar: cal)
+
+        let day1 = cal.startOfDay(for: d1Morning)
+        let day2 = cal.startOfDay(for: d2)
+        let day3 = cal.startOfDay(for: d3)
+        XCTAssertEqual(hist[day1], CalendarDayHistory(sentCount: 1, duplicateCount: 1, checkedCount: 0, failedCount: 0))
+        XCTAssertEqual(hist[day2], CalendarDayHistory(sentCount: 0, duplicateCount: 0, checkedCount: 1, failedCount: 0)) // o1(FOLD2)は除外
+        XCTAssertEqual(hist[day3], CalendarDayHistory(sentCount: 0, duplicateCount: 0, checkedCount: 0, failedCount: 1))
+    }
 }

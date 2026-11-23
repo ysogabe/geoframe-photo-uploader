@@ -13,6 +13,27 @@ public enum CachedStatus: String, Codable, Sendable {
     case failed
 }
 
+/// カレンダー 1 日分のローカル送信・確認履歴集計。
+public struct CalendarDayHistory: Equatable, Sendable {
+    public var sentCount: Int = 0
+    public var duplicateCount: Int = 0
+    public var checkedCount: Int = 0
+    public var failedCount: Int = 0
+
+    public init(sentCount: Int = 0, duplicateCount: Int = 0, checkedCount: Int = 0, failedCount: Int = 0) {
+        self.sentCount = sentCount
+        self.duplicateCount = duplicateCount
+        self.checkedCount = checkedCount
+        self.failedCount = failedCount
+    }
+
+    public var totalCount: Int { sentCount + duplicateCount + checkedCount + failedCount }
+    public var hasSent: Bool { sentCount > 0 }
+    public var hasChecked: Bool { checkedCount > 0 }
+    public var hasDuplicate: Bool { duplicateCount > 0 }
+    public var hasFailed: Bool { failedCount > 0 }
+}
+
 /// item-cache.json の 1 エントリ（キーは localIdentifier）。
 public struct CacheEntry: Codable, Sendable, Equatable {
     public var originalFilename: String?
@@ -26,13 +47,16 @@ public struct CacheEntry: Codable, Sendable, Equatable {
     public var driveFileId: String?
     public var statusAt: Date?
     public var folderId: String?
+    /// 写真の撮影日時（カレンダー履歴表示用）
+    public var creationDate: Date?
 
     public init(originalFilename: String?, uti: String?, md5: String? = nil, sha256: String? = nil, byteCount: Int64? = nil,
                 hashedAt: Date? = nil, lastStatus: CachedStatus? = nil, driveFileId: String? = nil, statusAt: Date? = nil,
-                folderId: String? = nil) {
+                folderId: String? = nil, creationDate: Date? = nil) {
         self.originalFilename = originalFilename; self.uti = uti; self.md5 = md5; self.sha256 = sha256
         self.byteCount = byteCount; self.hashedAt = hashedAt; self.lastStatus = lastStatus
         self.driveFileId = driveFileId; self.statusAt = statusAt; self.folderId = folderId
+        self.creationDate = creationDate
     }
 
     /// 原本ファイル名と UTI が一致するときだけ有効。
@@ -99,7 +123,9 @@ public final class ResultCache: @unchecked Sendable {
                 log("item-cache.json を読めないため作り直します（退避: \(corruptBackupURL?.lastPathComponent ?? "失敗")）")
             }
         }
-        if importNewRecordsLocked() { saveLocked() }
+        let imported = importNewRecordsLocked()
+        let backfilled = backfillCreationDatesFromRecordsLocked()
+        if imported || backfilled { saveLocked() }
     }
 
     /// 他のプロセス（CLI / 古いビルドのアプリ）が書いた item-cache.json と records.jsonl の追記分を取り込む。
@@ -107,7 +133,9 @@ public final class ResultCache: @unchecked Sendable {
     public func refresh() {
         lock.withLock {
             let merged = mergeFromDiskLocked()
-            if importNewRecordsLocked() || merged { saveLocked() }
+            let imported = importNewRecordsLocked()
+            let backfilled = backfillCreationDatesFromRecordsLocked()
+            if imported || backfilled || merged { saveLocked() }
         }
     }
 
@@ -129,7 +157,70 @@ public final class ResultCache: @unchecked Sendable {
     public func entries(for items: [PhotoItem]) -> [String: CacheEntry] {
         lock.withLock {
             var out: [String: CacheEntry] = [:]
-            for it in items { if let e = entries[it.localIdentifier], e.matches(it) { out[it.localIdentifier] = e } }
+            var updated = false
+            for it in items {
+                guard var e = entries[it.localIdentifier], e.matches(it) else { continue }
+                if e.creationDate == nil, let cd = it.creationDate {
+                    e.creationDate = cd
+                    entries[it.localIdentifier] = e
+                    updated = true
+                }
+                out[it.localIdentifier] = e
+            }
+            if updated { saveLocked() }
+            return out
+        }
+    }
+
+    /// `creationDate` が未設定で、カレンダー履歴表示のための補完が必要な `localIdentifier` 一覧を返す。
+    public func missingCreationDateIds() -> [String] {
+        lock.withLock {
+            entries.compactMap { id, e in
+                guard e.creationDate == nil, e.lastStatus != nil || e.md5 != nil else { return nil }
+                return id
+            }
+        }
+    }
+
+    /// 外部（PhotoKit など）から取得した撮影日時を未設定エントリへ補完して保存する。
+    public func backfillCreationDates(_ datesById: [String: Date]) {
+        guard !datesById.isEmpty else { return }
+        lock.withLock {
+            mergeFromDiskLocked()
+            var changed = false
+            for (id, date) in datesById {
+                guard var e = entries[id], e.creationDate == nil else { continue }
+                e.creationDate = date
+                entries[id] = e
+                changed = true
+            }
+            if changed { saveLocked() }
+        }
+    }
+
+    /// 暦日（`startOfDay`）ごとのローカル送信・重複チェック履歴を返す。
+    public func dayHistories(forFolder folderId: String?, calendar: Calendar = .current) -> [Date: CalendarDayHistory] {
+        lock.withLock {
+            var out: [Date: CalendarDayHistory] = [:]
+            for e in entries.values {
+                guard let cd = e.creationDate, e.statusApplies(toFolder: folderId) else { continue }
+                let day = calendar.startOfDay(for: cd)
+                var h = out[day] ?? CalendarDayHistory()
+                switch e.lastStatus {
+                case .sent?:
+                    h.sentCount += 1
+                case .duplicateRemote?:
+                    h.duplicateCount += 1
+                case .checkedNotOnDrive?:
+                    h.checkedCount += 1
+                case .failed?:
+                    h.failedCount += 1
+                case nil:
+                    guard let m = e.md5, !m.isEmpty else { continue }
+                    h.checkedCount += 1
+                }
+                out[day] = h
+            }
             return out
         }
     }
@@ -194,8 +285,11 @@ public final class ResultCache: @unchecked Sendable {
     // MARK: 内部（lock 保持中に呼ぶ）
 
     private func validOrFresh(_ item: PhotoItem) -> CacheEntry {
-        if let e = entries[item.localIdentifier], e.matches(item) { return e }
-        return CacheEntry(originalFilename: item.originalFilename, uti: item.uti)
+        if var e = entries[item.localIdentifier], e.matches(item) {
+            if e.creationDate == nil { e.creationDate = item.creationDate }
+            return e
+        }
+        return CacheEntry(originalFilename: item.originalFilename, uti: item.uti, creationDate: item.creationDate)
     }
 
     private func applyStatus(item: PhotoItem, status: CachedStatus, driveFileId: String?, folderId: String?,
@@ -270,6 +364,11 @@ public final class ResultCache: @unchecked Sendable {
         }
         if out.lastStatus != nil, let sm = statusSide.md5?.lowercased(), let hm = out.md5?.lowercased(), sm != hm {
             out.lastStatus = nil; out.driveFileId = nil; out.statusAt = nil; out.folderId = nil
+        }
+        if (d.latest ?? .distantPast) > (m.latest ?? .distantPast) {
+            out.creationDate = d.creationDate ?? m.creationDate
+        } else {
+            out.creationDate = m.creationDate ?? d.creationDate
         }
         return out
     }
@@ -412,13 +511,14 @@ public final class ResultCache: @unchecked Sendable {
     static func apply(_ r: UploadRecord, to out: inout [String: CacheEntry], touched: inout Set<String>,
                       iso: ISO8601DateFormatter) {
         let date = iso.date(from: r.recordedAt) ?? .distantPast
+        let creationDate = r.creationDate.flatMap { iso.date(from: $0) }
         let id = r.localIdentifier
         let inPass = touched.contains(id)
         func newer(_ t: Date?) -> Bool {
             guard let t else { return true }
             return inPass ? date >= t : date > t
         }
-        let fresh = CacheEntry(originalFilename: r.originalFilename, uti: r.uti)
+        let fresh = CacheEntry(originalFilename: r.originalFilename, uti: r.uti, creationDate: creationDate)
         var e = out[id] ?? fresh
         if e.originalFilename != r.originalFilename || e.uti != r.uti {
             guard newer(e.latest) else { return }
@@ -455,9 +555,38 @@ public final class ResultCache: @unchecked Sendable {
             if status == .duplicateRemote, fileId == nil, e.lastStatus == .duplicateRemote { fileId = e.driveFileId }
             e.lastStatus = status; e.driveFileId = fileId; e.statusAt = date; e.folderId = r.folderId
         }
+        if e.creationDate == nil, let creationDate {
+            e.creationDate = creationDate
+        }
         if e.md5 != nil || e.lastStatus != nil, out[id] != e {
             out[id] = e
             touched.insert(id)
         }
+    }
+
+    /// 既存キャッシュで `recordsImportedThrough` 到達済みのため `creationDate` が欠落しているエントリを `records.jsonl` から補完する。
+    @discardableResult
+    private func backfillCreationDatesFromRecordsLocked() -> Bool {
+        guard let records,
+              entries.values.contains(where: { $0.creationDate == nil && ($0.lastStatus != nil || $0.md5 != nil) }),
+              let data = try? Data(contentsOf: records.fileURL) else {
+            return false
+        }
+        let dec = JSONDecoder()
+        let iso = ISO8601DateFormatter()
+        var changed = false
+        for line in data.split(separator: 0x0A) {
+            guard let r = try? dec.decode(UploadRecord.self, from: Data(line)),
+                  let cdStr = r.creationDate,
+                  let cd = iso.date(from: cdStr),
+                  var e = entries[r.localIdentifier],
+                  e.creationDate == nil,
+                  e.originalFilename == r.originalFilename,
+                  e.uti == r.uti else { continue }
+            e.creationDate = cd
+            entries[r.localIdentifier] = e
+            changed = true
+        }
+        return changed
     }
 }

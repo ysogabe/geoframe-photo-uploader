@@ -123,7 +123,7 @@ private struct SectionBlockView: View {
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
                     Text(Self.timeRangeText(start: section.startDate, end: section.endDate,
-                                            includeDate: model.dateMode == .range || Self.spansMultipleDays(section.startDate, section.endDate)))
+                                            includeDate: model.isMultiDayRange || Self.spansMultipleDays(section.startDate, section.endDate)))
                         .font(.callout.monospacedDigit().weight(.semibold))
                         .padding(.horizontal, 7)
                         .padding(.vertical, 2)

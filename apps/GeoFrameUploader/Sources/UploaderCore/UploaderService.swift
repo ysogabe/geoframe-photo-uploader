@@ -68,6 +68,20 @@ public actor UploaderService {
         return c.entries(for: items)
     }
 
+    /// カレンダー表示用の日別送信・確認履歴を返す。撮影日が未保存のエントリがあれば許可済み時に PhotoKit から補完する。
+    public func calendarDayHistories(folderId: String?, calendar: Calendar = .current) -> [Date: CalendarDayHistory] {
+        let c = resultCache()
+        c.refresh()
+        let missing = c.missingCreationDateIds()
+        if !missing.isEmpty && PhotoLibrary.currentAuthorization() == .authorized {
+            let dates = PhotoLibrary.shared.creationDates(for: missing)
+            if !dates.isEmpty {
+                c.backfillCreationDates(dates)
+            }
+        }
+        return c.dayHistories(forFolder: folderId, calendar: calendar)
+    }
+
     // MARK: 状態
 
     /// プロンプトを一切出さない状態確認。

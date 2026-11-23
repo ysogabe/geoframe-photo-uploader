@@ -128,7 +128,7 @@
         <figure class="shot tab-pane" data-pane="main" hidden>
           <img src="images/screen-main.png" width="1040" height="929" alt="GeoFrame Uploader の一覧画面。日付絞り込み、送信済み・重複バッジ、対象外表示、自動重複確認の切り替えを表示">
           <figcaption>
-            <span><strong>一覧画面（見本）</strong> 単日 / 期間で写真を読み込み、前回結果バッジと形式判定を表示。「選んだら自動で重複確認」をオンにすると、選択した写真をすぐに（約 0.3 秒後）Google ドライブと照合します。</span>
+            <span><strong>一覧画面（見本）</strong> クイックプリセットや2ヶ月見開き・大判カレンダー（送信済み・確認履歴表示付き）で写真を読み込み、前回結果バッジと形式判定を表示。「選んだら自動で重複確認」をオンにすると、選択した写真をすぐに（約 0.3 秒後）Google ドライブと照合します。</span>
             <span>見本画面</span>
           </figcaption>
         </figure>
@@ -199,7 +199,7 @@
         <article class="feature">
           <span class="micro-label">RESULT &amp; QUALITY CACHE</span>
           <h3>結果・品質・地名をローカルキャッシュ</h3>
-          <p><code>item-cache.json</code>（送信結果と MD5）・<code>quality-cache.json</code>（pHash と画質スコア）・<code>place-cache.json</code>（地名）を権限 <code>0600</code> で保存し、再読み込み時も高速表示します。</p>
+          <p><code>item-cache.json</code>（送信結果・MD5・撮影日）・<code>quality-cache.json</code>（pHash と画質スコア）・<code>place-cache.json</code>（地名）を権限 <code>0600</code> で保存。一覧バッジだけでなく、2ヶ月見開きカレンダー上でも過去の送信・確認履歴を一目で確認できます。</p>
         </article>
         <article class="feature">
           <span class="micro-label">OWN OAUTH + KEYCHAIN</span>

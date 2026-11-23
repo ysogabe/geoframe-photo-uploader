@@ -197,6 +197,23 @@ public final class PhotoLibrary: @unchecked Sendable {
     }
 
     public func stopCachingAll() { imageManager.stopCachingImagesForAllAssets() }
+
+    /// `.authorized` のときだけダイアログを出さずに撮影日時を取得する（履歴キャッシュ補完用）。
+    public func creationDates(for localIdentifiers: [String]) -> [String: Date] {
+        guard !localIdentifiers.isEmpty, Self.currentAuthorization() == .authorized else { return [:] }
+        let opts = PHFetchOptions()
+        opts.includeHiddenAssets = false
+        opts.includeAllBurstAssets = true
+        let assets = PHAsset.fetchAssets(withLocalIdentifiers: localIdentifiers, options: opts)
+        var out: [String: Date] = [:]
+        out.reserveCapacity(assets.count)
+        assets.enumerateObjects { asset, _, _ in
+            if let d = asset.creationDate {
+                out[asset.localIdentifier] = d
+            }
+        }
+        return out
+    }
 }
 
 /// 一度だけ true を返すフラグ（continuation の二重 resume 防止）。

@@ -97,4 +97,151 @@ public enum LocalTime {
         }
         return dayRange(from: fd, to: td, calendar: calendar)
     }
+
+    /// 開始日〜終了日の暦日数（同日なら 1）。
+    public static func inclusiveDayCount(from: Date, to: Date, calendar: Calendar = .current) -> Int {
+        let s = calendar.startOfDay(for: min(from, to))
+        let e = calendar.startOfDay(for: max(from, to))
+        let days = calendar.dateComponents([.day], from: s, to: e).day ?? 0
+        return max(1, days + 1)
+    }
+
+    public static func startOfMonth(for date: Date, calendar: Calendar = .current) -> Date {
+        let comps = calendar.dateComponents([.year, .month], from: date)
+        return calendar.startOfDay(for: calendar.date(from: comps) ?? date)
+    }
+
+    public static func addingMonths(_ delta: Int, to monthDate: Date, calendar: Calendar = .current) -> Date {
+        let m = startOfMonth(for: monthDate, calendar: calendar)
+        return calendar.date(byAdding: .month, value: delta, to: m) ?? m
+    }
+
+    /// 2ヶ月見開き・大判レンジカレンダー用の固定 42 マス（6 週 × 日曜始まり 7 列）を生成する。
+    public static func monthGrid(forMonth monthDate: Date, calendar: Calendar = .current) -> [CalendarDayCell] {
+        let firstOfMonth = startOfMonth(for: monthDate, calendar: calendar)
+        let weekday = calendar.component(.weekday, from: firstOfMonth) // 1 = 日曜 ... 7 = 土曜
+        let leadingDays = (weekday - 1 + 7) % 7
+        let gridStart = calendar.date(byAdding: .day, value: -leadingDays, to: firstOfMonth) ?? firstOfMonth
+        var out: [CalendarDayCell] = []
+        out.reserveCapacity(42)
+        for offset in 0..<42 {
+            let raw = calendar.date(byAdding: .day, value: offset, to: gridStart) ?? gridStart
+            let day = calendar.startOfDay(for: raw)
+            let inMonth = calendar.isDate(day, equalTo: firstOfMonth, toGranularity: .month)
+            let dayNum = calendar.component(.day, from: day)
+            let wd = calendar.component(.weekday, from: day)
+            let comps = calendar.dateComponents([.year, .month, .day], from: day)
+            let key = String(format: "%04d-%02d-%02d-%@", comps.year ?? 0, comps.month ?? 0, comps.day ?? 0, inMonth ? "c" : "a")
+            out.append(CalendarDayCell(id: key, date: day, dayNumber: dayNum, isCurrentMonth: inMonth, weekday: wd))
+        }
+        return out
+    }
+}
+
+/// 大判カレンダーの 1 日分セル。
+public struct CalendarDayCell: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let date: Date
+    public let dayNumber: Int
+    public let isCurrentMonth: Bool
+    /// 1 = 日曜 ... 7 = 土曜
+    public let weekday: Int
+
+    public init(id: String, date: Date, dayNumber: Int, isCurrentMonth: Bool, weekday: Int) {
+        self.id = id
+        self.date = date
+        self.dayNumber = dayNumber
+        self.isCurrentMonth = isCurrentMonth
+        self.weekday = weekday
+    }
+}
+
+/// よく使う日付範囲のクイックプリセット。
+public enum DateRangePreset: String, CaseIterable, Identifiable, Sendable {
+    case today
+    case yesterday
+    case last3Days
+    case last7Days
+    case last14Days
+    case last30Days
+    case thisMonth
+    case lastMonth
+
+    public var id: Self { self }
+
+    /// 上部ツールバー用の短いラベル。
+    public var shortLabel: String {
+        switch self {
+        case .today: return "今日"
+        case .yesterday: return "昨日"
+        case .last3Days: return "直近3日"
+        case .last7Days: return "直近7日"
+        case .last14Days: return "直近14日"
+        case .last30Days: return "直近30日"
+        case .thisMonth: return "今月"
+        case .lastMonth: return "先月"
+        }
+    }
+
+    /// ポップオーバー左サイド一覧用のラベル。
+    public var sidebarLabel: String {
+        switch self {
+        case .today: return "今日"
+        case .yesterday: return "昨日"
+        case .last3Days: return "直近 3 日間"
+        case .last7Days: return "直近 7 日間"
+        case .last14Days: return "直近 14 日間"
+        case .last30Days: return "直近 30 日間"
+        case .thisMonth: return "今月"
+        case .lastMonth: return "先月"
+        }
+    }
+
+    /// 上部バーに常時並べる主要プリセット。
+    public static let toolbarPresets: [DateRangePreset] = [
+        .today, .yesterday, .last3Days, .last7Days, .last30Days, .thisMonth,
+    ]
+
+    public func dateRange(now: Date = Date(), calendar: Calendar = .current) -> (from: Date, to: Date) {
+        let todayStart = calendar.startOfDay(for: now)
+        switch self {
+        case .today:
+            return (todayStart, todayStart)
+        case .yesterday:
+            let y = calendar.date(byAdding: .day, value: -1, to: todayStart) ?? todayStart
+            return (y, y)
+        case .last3Days:
+            let f = calendar.date(byAdding: .day, value: -2, to: todayStart) ?? todayStart
+            return (f, todayStart)
+        case .last7Days:
+            let f = calendar.date(byAdding: .day, value: -6, to: todayStart) ?? todayStart
+            return (f, todayStart)
+        case .last14Days:
+            let f = calendar.date(byAdding: .day, value: -13, to: todayStart) ?? todayStart
+            return (f, todayStart)
+        case .last30Days:
+            let f = calendar.date(byAdding: .day, value: -29, to: todayStart) ?? todayStart
+            return (f, todayStart)
+        case .thisMonth:
+            let startOfMonth = LocalTime.startOfMonth(for: todayStart, calendar: calendar)
+            return (startOfMonth, todayStart)
+        case .lastMonth:
+            let startOfThisMonth = LocalTime.startOfMonth(for: todayStart, calendar: calendar)
+            let startOfLastMonth = calendar.date(byAdding: .month, value: -1, to: startOfThisMonth) ?? startOfThisMonth
+            let endOfLastMonth = calendar.date(byAdding: .day, value: -1, to: startOfThisMonth) ?? startOfLastMonth
+            return (startOfLastMonth, endOfLastMonth)
+        }
+    }
+
+    public static func matching(from: Date, to: Date, now: Date = Date(), calendar: Calendar = .current) -> DateRangePreset? {
+        let s = min(from, to)
+        let e = max(from, to)
+        for preset in Self.allCases {
+            let r = preset.dateRange(now: now, calendar: calendar)
+            if calendar.isDate(s, inSameDayAs: r.from) && calendar.isDate(e, inSameDayAs: r.to) {
+                return preset
+            }
+        }
+        return nil
+    }
 }

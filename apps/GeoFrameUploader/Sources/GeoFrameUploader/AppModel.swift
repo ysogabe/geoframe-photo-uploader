@@ -2,12 +2,6 @@ import AppKit
 import SwiftUI
 import UploaderCore
 
-enum DateMode: String, CaseIterable, Identifiable {
-    case single = "単日"
-    case range = "期間"
-    var id: Self { self }
-}
-
 enum GroupingMode: String, CaseIterable, Identifiable {
     case sectioned = "場所・時間枠"
     case flat = "フラット一覧"
@@ -61,10 +55,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var folderId: String?
     @Published private(set) var isResolvingFolder = false
 
-    // 日付
-    @Published var dateMode: DateMode = .single
-    @Published var fromDate = Date()
-    @Published var toDate = Date()
+    // 日付（期間を標準とし、同日指定で 1 日分。既定は直近 7 日間）
+    @Published var fromDate: Date
+    @Published var toDate: Date
 
     // 一覧
     @Published private(set) var items: [PhotoItem] = []
@@ -149,6 +142,8 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @Published private(set) var calendarHistory: [Date: CalendarDayHistory] = [:]
+
     @Published var bundleSimilar: Bool = (UserDefaults.standard.object(forKey: AppModel.bundleSimilarKey) as? Bool) ?? true {
         didSet {
             guard bundleSimilar != oldValue else { return }
@@ -230,6 +225,9 @@ final class AppModel: ObservableObject {
     private var bannerDismissTask: Task<Void, Never>?
 
     init(service: UploaderService = UploaderService()) {
+        let initial = DateRangePreset.last7Days.dateRange()
+        self.fromDate = initial.from
+        self.toDate = initial.to
         self.service = service
         self.thumbnails = ThumbnailCache(service: service)
     }
@@ -251,6 +249,19 @@ final class AppModel: ObservableObject {
     var previouslySentCount: Int { items.filter { cachedStatus(for: $0)?.lastStatus == .sent }.count }
     var isAnalysisComplete: Bool { hasLoaded && analysisProgress == nil }
     var showComparePanel: Bool { comparingCluster != nil && !showSendPanel }
+    var isMultiDayRange: Bool { !Calendar.current.isDate(fromDate, inSameDayAs: toDate) }
+    var selectedDayCount: Int { LocalTime.inclusiveDayCount(from: fromDate, to: toDate) }
+
+    func setDateRange(from: Date, to: Date) {
+        let cal = Calendar.current
+        fromDate = cal.startOfDay(for: min(from, to))
+        toDate = cal.startOfDay(for: max(from, to))
+    }
+
+    func applyDatePreset(_ preset: DateRangePreset) {
+        let r = preset.dateRange()
+        setDateRange(from: r.from, to: r.to)
+    }
 
     var sectionOptions: SectionOptions {
         SectionOptions(
@@ -415,11 +426,27 @@ final class AppModel: ObservableObject {
             cancelAutoPrecheck()
             folderId = nil
             folderResolveAttempted = false
+            await refreshCalendarHistory()
             return
         }
         if let id = s.config.folderId { folderId = id }
         if folderId == nil && !folderResolveAttempted && !isSigningIn {
             await resolveFolder()
+        }
+        await refreshCalendarHistory()
+    }
+
+    func refreshCalendarHistory() async {
+        let targetFolder = folderId ?? status?.config.folderId
+        let histories = await service.calendarDayHistories(folderId: targetFolder)
+        if !isTerminating {
+            calendarHistory = histories
+        }
+    }
+
+    private func refreshCalendarHistoryAsync() {
+        Task { [weak self] in
+            await self?.refreshCalendarHistory()
         }
     }
 
@@ -510,8 +537,7 @@ final class AppModel: ObservableObject {
 
     func load() {
         guard !isBusy, !isTerminating else { return }
-        let to = dateMode == .single ? fromDate : toDate
-        let range = LocalTime.dayRange(from: fromDate, to: to)
+        let range = LocalTime.dayRange(from: fromDate, to: toDate)
         cancelAutoPrecheck()
         cancelBackgroundAnalysis()
         loadGeneration &+= 1
@@ -846,6 +872,7 @@ final class AppModel: ObservableObject {
             self.isCancelling = false
             self.progress = nil
             self.precheckTask = nil
+            await self.refreshCalendarHistory()
         }
     }
 
@@ -973,6 +1000,7 @@ final class AppModel: ObservableObject {
         uploadSummaryTask = nil
         // 「アップロード済みだが未検証」の失敗を誤って再送しないよう、選択は解除する
         selection = []
+        refreshCalendarHistoryAsync()
     }
 
     /// 「中止」: 実行中の送信または重複確認を止める。
@@ -1162,6 +1190,7 @@ final class AppModel: ObservableObject {
             if let msg = AutoPrecheckText.deselectedBanner(names: autoDeselectedNames) { showBanner(.info, msg) }
             autoDeselectedNames = []
         }
+        if counted { refreshCalendarHistoryAsync() }
         updateAutoProgress()
     }
 
