@@ -32,6 +32,20 @@ struct Banner: Identifiable, Equatable {
     var message: String
 }
 
+struct LocationPickerRequest: Identifiable {
+    let id = UUID()
+    let assignableItems: [PhotoItem]
+    let skippedExistingCount: Int
+    let preferredSectionId: String?
+}
+
+struct LocationCandidate: Identifiable, Equatable {
+    let id: String
+    let location: PhotoLocation
+    let title: String
+    let subtitle: String
+}
+
 struct RunProgress: Equatable {
     enum Kind { case upload, precheck }
     var kind: Kind
@@ -71,15 +85,25 @@ final class AppModel: ObservableObject {
     /// 「送信済み・重複を隠す」
     @Published var hideDone = false {
         didSet {
-            if hideDone { pruneHiddenSelection() }
+            if hideDone { pruneInvisibleSelection() }
             invalidateShiftAnchorIfNeeded()
         }
     }
+    /// 「位置なしのみ」
+    @Published var onlyMissingLocation = false {
+        didSet {
+            if onlyMissingLocation { pruneInvisibleSelection() }
+            invalidateShiftAnchorIfNeeded()
+        }
+    }
+    /// 欠落位置情報の補完値（`location-overrides.json`、既存位置は上書きしない）
+    @Published private(set) var locationOverrides: [String: LocationOverrideEntry] = [:]
+    @Published var locationPickerRequest: LocationPickerRequest?
 
-    /// 隠れている（送信済み・重複とみなせる）写真を選択から外す。
-    private func pruneHiddenSelection() {
-        let hidden = Set(items.filter { isDone($0) }.map(\.id))
-        if !hidden.isDisjoint(with: selection) { selection.subtract(hidden) }
+    /// 隠れている（送信済み・重複／フィルタ対象外の）写真を選択から外す。
+    private func pruneInvisibleSelection() {
+        let invisible = Set(items.filter { !isVisible($0) }.map(\.id))
+        if !invisible.isDisjoint(with: selection) { selection.subtract(invisible) }
     }
 
     // 実行
@@ -210,9 +234,11 @@ final class AppModel: ObservableObject {
     private var placeDebounceTask: Task<Void, Never>?
     private var placeResolutionTask: Task<Void, Never>?
 
-    // 確認ダイアログ（20 件超）
+    // 確認ダイアログ（20 件超・位置なし含む）
     @Published var showSendConfirm = false
+    @Published var showMissingLocationSendConfirm = false
     @Published private(set) var pendingSend: [PhotoItem] = []
+    @Published private(set) var pendingMissingLocationItems: [PhotoItem] = []
 
     @Published var banner: Banner?
 
@@ -244,13 +270,40 @@ final class AppModel: ObservableObject {
     var eligibleCount: Int { items.filter { $0.eligibility.isEligible }.count }
     var ineligibleCount: Int { items.count - eligibleCount }
     var selectedItems: [PhotoItem] { items.filter { selection.contains($0.id) } }
-    var visibleItems: [PhotoItem] { hideDone ? items.filter { !isDone($0) } : items }
+    var visibleItems: [PhotoItem] { items.filter { isVisible($0) } }
     var hiddenCount: Int { items.count - visibleItems.count }
     var previouslySentCount: Int { items.filter { cachedStatus(for: $0)?.lastStatus == .sent }.count }
     var isAnalysisComplete: Bool { hasLoaded && analysisProgress == nil }
     var showComparePanel: Bool { comparingCluster != nil && !showSendPanel }
     var isMultiDayRange: Bool { !Calendar.current.isDate(fromDate, inSameDayAs: toDate) }
     var selectedDayCount: Int { LocalTime.inclusiveDayCount(from: fromDate, to: toDate) }
+    var missingLocationCount: Int { items.filter { $0.eligibility.isEligible && isMissingLocation($0) }.count }
+    var supplementedLocationCount: Int { items.filter { $0.eligibility.isEligible && locationOverride(for: $0) != nil }.count }
+    var selectedAssignableLocationItems: [PhotoItem] { selectedItems.filter { $0.eligibility.isEligible && !hasOriginalLocation($0) } }
+
+    func hasOriginalLocation(_ item: PhotoItem) -> Bool {
+        item.location.map(PhotoSectioner.isValidCoordinate) ?? false
+    }
+
+    func locationOverride(for item: PhotoItem) -> LocationOverrideEntry? {
+        guard !hasOriginalLocation(item) else { return nil }
+        return locationOverrides[item.id]
+    }
+
+    func effectiveLocation(for item: PhotoItem) -> PhotoLocation? {
+        if hasOriginalLocation(item) { return item.location }
+        return locationOverride(for: item)?.location
+    }
+
+    func isMissingLocation(_ item: PhotoItem) -> Bool {
+        effectiveLocation(for: item) == nil
+    }
+
+    func isVisible(_ item: PhotoItem) -> Bool {
+        if hideDone && isDone(item) { return false }
+        if onlyMissingLocation && (!item.eligibility.isEligible || !isMissingLocation(item)) { return false }
+        return true
+    }
 
     func setDateRange(from: Date, to: Date) {
         let cal = Calendar.current
@@ -284,7 +337,7 @@ final class AppModel: ObservableObject {
     }
 
     func visibleItems(in section: PhotoSection) -> [PhotoItem] {
-        hideDone ? section.items.filter { !isDone($0) } : section.items
+        section.items.filter { isVisible($0) }
     }
 
     func grouping(for sectionId: String) -> SectionGroupingResult {
@@ -550,9 +603,12 @@ final class AppModel: ObservableObject {
                 guard !isTerminating, loadGeneration == loadGen else { return }
                 cachedEntries = await service.cachedEntries(for: loaded)
                 let cachedQ = await service.cachedQuality(for: loaded)
+                let loadedOverrides = await service.locationOverrides(for: loaded)
                 guard !isTerminating, loadGeneration == loadGen else { return }
                 items = loaded
                 qualityMetrics = cachedQ
+                locationOverrides = loadedOverrides
+                locationPickerRequest = nil
                 hasLoaded = true
                 cancelAutoPrecheck()
                 selection = []
@@ -692,10 +748,207 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: 位置情報補完（既存位置は上書きしない）
+
+    func openLocationPicker(for targetItems: [PhotoItem], preferredSectionId: String? = nil) {
+        guard !isBusy else { return }
+        closeComparison()
+        let eligibleTargets = targetItems.filter { $0.eligibility.isEligible }
+        guard !eligibleTargets.isEmpty else { return }
+        let assignable = eligibleTargets.filter { !hasOriginalLocation($0) }
+        let skipped = eligibleTargets.count - assignable.count
+        guard !assignable.isEmpty else {
+            showBanner(.info, "対象の写真にはすべて既存の位置情報があるため上書きできません")
+            return
+        }
+        locationPickerRequest = LocationPickerRequest(
+            assignableItems: assignable,
+            skippedExistingCount: skipped,
+            preferredSectionId: preferredSectionId
+        )
+    }
+
+    func openLocationPickerForSelection() {
+        openLocationPicker(for: selectedItems)
+    }
+
+    func applySectionLocation(in section: PhotoSection) {
+        guard !isBusy, let rep = section.representativeLocation, PhotoSectioner.isValidCoordinate(rep) else { return }
+        let targets = section.items.filter { $0.eligibility.isEligible && isMissingLocation($0) && (!hideDone || !isDone($0)) }
+        guard !targets.isEmpty else { return }
+        let placeName = section.locationKey.flatMap { placeNames[$0] }
+        Task {
+            await applyLocationSupplement(
+                items: targets,
+                location: rep,
+                source: .uploaderBorrowed,
+                placeName: placeName,
+                writeBackToPhotos: false
+            )
+        }
+    }
+
+    func locationCandidates(for targetItems: [PhotoItem], preferredSectionId: String?) -> [LocationCandidate] {
+        let targetDates = targetItems.compactMap(\.creationDate)
+        let targetCenter: Date? = targetDates.isEmpty
+            ? nil
+            : Date(timeIntervalSince1970: targetDates.map(\.timeIntervalSince1970).reduce(0, +) / Double(targetDates.count))
+
+        let tf = DateFormatter()
+        tf.locale = Locale(identifier: "en_US_POSIX")
+        tf.dateFormat = isMultiDayRange ? "MM/dd HH:mm" : "HH:mm"
+
+        struct RawCandidate {
+            let candidate: LocationCandidate
+            let isPreferred: Bool
+            let isBorrowed: Bool
+            let timeDistance: TimeInterval
+        }
+
+        var collected: [RawCandidate] = []
+        var seenKeys = Set<String>()
+
+        for sec in sections {
+            guard let loc = sec.representativeLocation,
+                  let key = sec.locationKey ?? PhotoSectioner.coordinateKey(loc),
+                  !seenKeys.contains(key) else { continue }
+            seenKeys.insert(key)
+
+            let title = placeNames[key] ?? String(format: "%.4f, %.4f", loc.lat, loc.lon)
+            let timeStr = sec.startDate.map { tf.string(from: $0) } ?? "--:--"
+            let borrowedTag = sec.isLocationBorrowed ? "（推定）" : ""
+            let subtitle = "\(timeStr)〜 ・ \(sec.items.count) 枚\(borrowedTag)"
+
+            let secMid: Date?
+            if let s = sec.startDate, let e = sec.endDate {
+                secMid = Date(timeIntervalSince1970: (s.timeIntervalSince1970 + e.timeIntervalSince1970) / 2.0)
+            } else {
+                secMid = sec.startDate
+            }
+            let dist = (targetCenter != nil && secMid != nil)
+                ? abs(secMid!.timeIntervalSince(targetCenter!))
+                : TimeInterval.infinity
+
+            collected.append(RawCandidate(
+                candidate: LocationCandidate(id: key, location: loc, title: title, subtitle: subtitle),
+                isPreferred: sec.id == preferredSectionId,
+                isBorrowed: sec.isLocationBorrowed,
+                timeDistance: dist
+            ))
+        }
+
+        return collected.sorted { a, b in
+            if a.isPreferred != b.isPreferred { return a.isPreferred }
+            if a.isBorrowed != b.isBorrowed { return !a.isBorrowed }
+            if a.timeDistance != b.timeDistance { return a.timeDistance < b.timeDistance }
+            return a.candidate.id < b.candidate.id
+        }
+        .map(\.candidate)
+    }
+
+    func applyLocationSupplement(
+        items targetItems: [PhotoItem],
+        location: PhotoLocation,
+        source: LocationSupplementSource,
+        placeName: String?,
+        writeBackToPhotos: Bool
+    ) async {
+        let assignable = targetItems.filter { $0.eligibility.isEligible && !hasOriginalLocation($0) }
+        guard !assignable.isEmpty, PhotoSectioner.isValidCoordinate(location) else { return }
+
+        let savedCount = await service.saveLocationOverride(
+            items: assignable,
+            location: location,
+            source: source,
+            placeName: placeName
+        )
+        var photosNote: String?
+        var bannerKind: Banner.Kind = .info
+
+        if writeBackToPhotos {
+            do {
+                let summary = try await service.writeLocationToPhotosIfMissing(
+                    localIdentifiers: assignable.map(\.id),
+                    location: location
+                )
+                if !summary.updatedIds.isEmpty {
+                    let refreshed = try await service.reloadItems(localIdentifiers: summary.updatedIds)
+                    let byId = Dictionary(uniqueKeysWithValues: refreshed.map { ($0.id, $0) })
+                    for idx in items.indices {
+                        if let updated = byId[items[idx].id] {
+                            items[idx] = updated
+                        }
+                    }
+                    await service.removeLocationOverrides(localIdentifiers: summary.updatedIds)
+                }
+                var parts: [String] = []
+                if !summary.updatedIds.isEmpty {
+                    parts.append("Apple Photos へ \(summary.updatedIds.count) 件書き込み")
+                }
+                if !summary.skippedAlreadyHasLocationIds.isEmpty {
+                    parts.append("既存位置ありスキップ \(summary.skippedAlreadyHasLocationIds.count) 件")
+                }
+                if !summary.skippedNotEditableIds.isEmpty {
+                    parts.append("変更不可 \(summary.skippedNotEditableIds.count) 件")
+                    bannerKind = .warning
+                }
+                if !summary.missingAssetIds.isEmpty {
+                    parts.append("見つからず \(summary.missingAssetIds.count) 件")
+                    bannerKind = .warning
+                }
+                if !parts.isEmpty {
+                    photosNote = parts.joined(separator: "・")
+                }
+            } catch {
+                bannerKind = .warning
+                photosNote = "Apple Photos への書き戻しに失敗: \(Redactor.redact(error.localizedDescription))"
+            }
+        }
+
+        locationOverrides = await service.locationOverrides(for: items)
+        if let placeName, let key = PhotoSectioner.coordinateKey(location), placeNames[key] == nil {
+            placeNames[key] = placeName
+        }
+        recomputeSections()
+        recomputeGroupings()
+        schedulePlaceResolution(generation: analysisGeneration)
+        if onlyMissingLocation {
+            pruneInvisibleSelection()
+        }
+        invalidateShiftAnchorIfNeeded()
+
+        var msg = "補完位置を \(savedCount) 件保存しました"
+        if let photosNote {
+            msg += "（\(photosNote)）"
+        }
+        showBanner(bannerKind, msg)
+    }
+
+    func clearLocationOverrides(for targetItems: [PhotoItem]) async {
+        let ids = targetItems.filter { locationOverride(for: $0) != nil }.map(\.id)
+        guard !ids.isEmpty else { return }
+        await service.removeLocationOverrides(localIdentifiers: ids)
+        locationOverrides = await service.locationOverrides(for: items)
+        recomputeSections()
+        recomputeGroupings()
+        schedulePlaceResolution(generation: analysisGeneration)
+        if onlyMissingLocation {
+            pruneInvisibleSelection()
+        }
+        invalidateShiftAnchorIfNeeded()
+        showBanner(.info, "補完した位置情報を \(ids.count) 件クリアしました")
+    }
+
     // MARK: セクション・類似グルーピング・地名解決
 
     private func recomputeSections() {
-        sections = PhotoSectioner.section(items: items, options: sectionOptions)
+        var overrideCoords: [String: PhotoLocation] = [:]
+        for item in items where !hasOriginalLocation(item) {
+            if let ov = locationOverrides[item.id] {
+                overrideCoords[item.id] = ov.location
+            }
+        }
+        sections = PhotoSectioner.section(items: items, options: sectionOptions, locationOverrides: overrideCoords)
     }
 
     /// 表示モード（フラット / セクション）に関わらず、常に場所・時間枠単位で類似判定と推奨順位を保つ。
@@ -848,7 +1101,7 @@ final class AppModel: ObservableObject {
                     Task { @MainActor in self.updatePrecheckProgress(done: done, total: total) }
                 }
                 for x in r { self.prechecks[x.localIdentifier] = x }
-                if self.hideDone { self.pruneHiddenSelection() }
+                if self.hideDone || self.onlyMissingLocation { self.pruneInvisibleSelection() }
                 let toUpload = r.filter { $0.decision == .toUpload }.count
                 let dup = r.filter {
                     switch $0.decision {
@@ -887,11 +1140,16 @@ final class AppModel: ObservableObject {
 
     // MARK: 送信
 
-    /// 「送信」ボタン。20 件を超えるときは確認ダイアログを出し、ユーザーの承認後にだけ送る。
+    /// 「送信」ボタン。位置なし写真を含む場合、または 20 件を超えるときは確認ダイアログを出し、承認後にだけ送る。
     func requestSend() {
         let snapshot = selectedItems
         guard canSend, !snapshot.isEmpty else { return }
-        if snapshot.count > Self.confirmThreshold {
+        let missing = snapshot.filter { $0.eligibility.isEligible && isMissingLocation($0) }
+        if !missing.isEmpty {
+            pendingSend = snapshot
+            pendingMissingLocationItems = missing
+            showMissingLocationSendConfirm = true
+        } else if snapshot.count > Self.confirmThreshold {
             pendingSend = snapshot
             showSendConfirm = true
         } else {
@@ -901,13 +1159,23 @@ final class AppModel: ObservableObject {
 
     func confirmPendingSend(_ items: [PhotoItem]) {
         showSendConfirm = false
+        showMissingLocationSendConfirm = false
         pendingSend = []
+        pendingMissingLocationItems = []
         startUpload(items)
     }
 
     func cancelPendingSend() {
         showSendConfirm = false
+        showMissingLocationSendConfirm = false
         pendingSend = []
+        pendingMissingLocationItems = []
+    }
+
+    func openLocationPickerFromSendWarning() {
+        let missing = pendingMissingLocationItems
+        cancelPendingSend()
+        openLocationPicker(for: missing)
     }
 
     private func startUpload(_ snapshot: [PhotoItem]) {
@@ -1166,8 +1434,8 @@ final class AppModel: ObservableObject {
                 if AutoPrecheckQueue.shouldDeselect(r.decision) {
                     autoDeselectedNames.append(item.driveName)
                     selection.remove(id)
-                } else if hideDone {
-                    pruneHiddenSelection()
+                } else if hideDone || onlyMissingLocation {
+                    pruneInvisibleSelection()
                 }
                 finishAutoItem(id, counted: true)
             } catch {

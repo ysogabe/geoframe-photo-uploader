@@ -21,10 +21,13 @@ public struct ExportedOriginal: Sendable {
     public let sha256Hex: String
     public let dataSource: DataSource
     public let exif: ExifDates?
+    public let exifGPS: PhotoLocation?
 
-    public init(fileURL: URL, byteCount: Int64, md5Hex: String, sha256Hex: String, dataSource: DataSource, exif: ExifDates?) {
+    public init(fileURL: URL, byteCount: Int64, md5Hex: String, sha256Hex: String, dataSource: DataSource,
+                exif: ExifDates?, exifGPS: PhotoLocation? = nil) {
         self.fileURL = fileURL; self.byteCount = byteCount; self.md5Hex = md5Hex
         self.sha256Hex = sha256Hex; self.dataSource = dataSource; self.exif = exif
+        self.exifGPS = exifGPS
     }
 
     public func remove() { try? FileManager.default.removeItem(at: fileURL) }
@@ -156,8 +159,9 @@ public final class OriginalExporter: OriginalExporting, @unchecked Sendable {
             do {
                 try await request(resource, network: network, sink: sink)
                 let r = try sink.finish()
+                let meta = Self.readExifMetadata(url: url)
                 return ExportedOriginal(fileURL: url, byteCount: r.bytes, md5Hex: r.md5, sha256Hex: r.sha256,
-                                        dataSource: network ? .iCloud : .local, exif: Self.readExifDates(url: url))
+                                        dataSource: network ? .iCloud : .local, exif: meta.dates, exifGPS: meta.gps)
             } catch {
                 sink.discard()
                 if error is CancellationError { throw error }
@@ -204,15 +208,57 @@ public final class OriginalExporter: OriginalExporting, @unchecked Sendable {
         }
     }
 
+    /// EXIF 日時と GPS 座標を読む（ベストエフォート、原本は変更しない）。
+    public static func readExifMetadata(url: URL) -> (dates: ExifDates?, gps: PhotoLocation?) {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else {
+            return (nil, nil)
+        }
+        var dates: ExifDates?
+        if let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] {
+            let dto = exif[kCGImagePropertyExifDateTimeOriginal] as? String
+            let off = exif[kCGImagePropertyExifOffsetTimeOriginal] as? String
+            if dto != nil || off != nil {
+                dates = ExifDates(dateTimeOriginal: dto, offsetTimeOriginal: off)
+            }
+        }
+        var gpsLoc: PhotoLocation?
+        if let gps = props[kCGImagePropertyGPSDictionary] as? [CFString: Any],
+           let latRaw = gpsNumber(gps[kCGImagePropertyGPSLatitude]),
+           let lonRaw = gpsNumber(gps[kCGImagePropertyGPSLongitude]) {
+            let latRef = (gps[kCGImagePropertyGPSLatitudeRef] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            let lonRef = (gps[kCGImagePropertyGPSLongitudeRef] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+            let lat = (latRef == "S") ? -abs(latRaw) : (latRef == "N" ? abs(latRaw) : latRaw)
+            let lon = (lonRef == "W") ? -abs(lonRaw) : (lonRef == "E" ? abs(lonRaw) : lonRaw)
+            var alt: Double?
+            if let altRaw = gpsNumber(gps[kCGImagePropertyGPSAltitude]), altRaw.isFinite {
+                let altRef = (gps[kCGImagePropertyGPSAltitudeRef] as? NSNumber)?.intValue
+                alt = (altRef == 1) ? -abs(altRaw) : abs(altRaw)
+            }
+            let candidate = PhotoLocation(lat: lat, lon: lon, altitude: alt)
+            if PhotoSectioner.isValidCoordinate(candidate) {
+                gpsLoc = candidate
+            }
+        }
+        return (dates, gpsLoc)
+    }
+
+    private static func gpsNumber(_ raw: Any?) -> Double? {
+        if let n = raw as? NSNumber { return n.doubleValue }
+        if let s = raw as? String { return Double(s.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        return nil
+    }
+
     /// EXIF DateTimeOriginal / OffsetTimeOriginal を読む（ベストエフォート）。
     public static func readExifDates(url: URL) -> ExifDates? {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
-              let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any] else { return nil }
-        let dto = exif[kCGImagePropertyExifDateTimeOriginal] as? String
-        let off = exif[kCGImagePropertyExifOffsetTimeOriginal] as? String
-        if dto == nil && off == nil { return nil }
-        return ExifDates(dateTimeOriginal: dto, offsetTimeOriginal: off)
+        readExifMetadata(url: url).dates
+    }
+
+    /// EXIF GPS 座標を読む（ベストエフォート）。
+    public static func readExifGPS(url: URL) -> PhotoLocation? {
+        readExifMetadata(url: url).gps
     }
 
     public static func hashFile(at url: URL) throws -> (md5: String, sha256: String, bytes: Int64) {

@@ -134,6 +134,12 @@ struct DateFilterView: View {
                         .fixedSize()
                         .help("同じバーストや 3 分以内・pHash 距離 12 以下の似た写真をまとめて表示します")
 
+                    Toggle("位置なしのみ", isOn: $model.onlyMissingLocation)
+                        .toggleStyle(.checkbox)
+                        .fixedSize()
+                        .disabled(model.missingLocationCount == 0 && !model.onlyMissingLocation)
+                        .help("位置情報がない対象写真だけを表示します")
+
                     Spacer()
 
                     if let ap = model.analysisProgress {
@@ -172,6 +178,8 @@ struct DateFilterView: View {
 
                 Text("全 \(model.items.count) 件 / 対象 \(model.eligibleCount) 件 / 対象外 \(model.ineligibleCount) 件"
                      + " / 前回送信済み \(model.previouslySentCount) 件"
+                     + (model.missingLocationCount > 0 ? " / 位置なし \(model.missingLocationCount) 件" : "")
+                     + (model.supplementedLocationCount > 0 ? " / 位置補完 \(model.supplementedLocationCount) 件" : "")
                      + (model.similarClusterCount > 0 ? " / 類似 \(model.similarClusterCount) グループ" : "")
                      + (model.hiddenCount > 0 ? "（\(model.hiddenCount) 件を非表示）" : ""))
                     .font(.caption)

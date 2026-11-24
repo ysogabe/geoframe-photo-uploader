@@ -54,6 +54,14 @@ struct ActionBarView: View {
                 .keyboardShortcut(.cancelAction)
             }
 
+            Button {
+                model.openLocationPickerForSelection()
+            } label: {
+                Label("位置を設定…", systemImage: "mappin.and.ellipse")
+            }
+            .disabled(model.isBusy || model.selectedAssignableLocationItems.isEmpty)
+            .help("選択中の写真のうち、位置情報がない写真にのみ位置を補完します（既存の位置情報は上書きしません）")
+
             Button("重複を確認") { model.precheck() }
                 .disabled(!model.canPrecheck)
                 .help("選択した写真の原本 MD5 を計算し、Drive フォルダ内のファイルと照合します（送信はしません）")

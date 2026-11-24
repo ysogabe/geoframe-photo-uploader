@@ -86,8 +86,19 @@ public enum PhotoSectioner {
     }
 
     /// 全 `items`（`hideDone` 適用前）に対して安定ソート＆セクション分割する。
-    public static func section(items: [PhotoItem], options: SectionOptions = SectionOptions()) -> [PhotoSection] {
+    /// `locationOverrides` は原本 `PhotoItem.location` が欠落している写真の表示・セクション分割補完にのみ使い、元の `PhotoItem` は書き換えない。
+    public static func section(
+        items: [PhotoItem],
+        options: SectionOptions = SectionOptions(),
+        locationOverrides: [String: PhotoLocation] = [:]
+    ) -> [PhotoSection] {
         guard !items.isEmpty else { return [] }
+
+        func effectiveLoc(_ item: PhotoItem) -> PhotoLocation? {
+            if let real = item.location, isValidCoordinate(real) { return real }
+            if let ov = locationOverrides[item.localIdentifier], isValidCoordinate(ov) { return ov }
+            return nil
+        }
 
         let timed = items
             .filter { $0.creationDate != nil }
@@ -102,9 +113,9 @@ public enum PhotoSectioner {
             .filter { $0.creationDate == nil }
             .sorted { $0.localIdentifier < $1.localIdentifier }
 
-        // 実 GPS を持つ時刻順アンカー一覧（表示用補完のみに使う）
+        // 実 GPS（または補完位置）を持つ時刻順アンカー一覧（表示用補完のみに使う）
         let anchors: [(date: Date, loc: PhotoLocation)] = timed.compactMap { it in
-            guard let d = it.creationDate, let l = it.location, isValidCoordinate(l) else { return nil }
+            guard let d = it.creationDate, let l = effectiveLoc(it) else { return nil }
             return (d, l)
         }
 
@@ -115,7 +126,7 @@ public enum PhotoSectioner {
 
         for item in timed {
             let d = item.creationDate!
-            let realLoc = item.location.flatMap { isValidCoordinate($0) ? $0 : nil }
+            let realLoc = effectiveLoc(item)
 
             var split = false
             if let pd = prevDate, d.timeIntervalSince(pd) > options.timeGapSeconds {
@@ -145,7 +156,7 @@ public enum PhotoSectioner {
         var sections: [PhotoSection] = buckets.map { group in
             let start = group.first?.creationDate
             let end = group.last?.creationDate
-            let firstReal = group.compactMap { $0.location }.first(where: isValidCoordinate)
+            let firstReal = group.compactMap(effectiveLoc).first
             let rep: PhotoLocation?
             let borrowed: Bool
             if let firstReal {

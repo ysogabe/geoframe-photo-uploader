@@ -12,8 +12,13 @@ struct PhotoGridView: View {
             if model.items.isEmpty {
                 emptyState
             } else if model.visibleItems.isEmpty {
-                ContentUnavailableView("すべて非表示です", systemImage: "eye.slash",
-                                       description: Text("送信済み・重複の \(model.hiddenCount) 件を隠しています。"))
+                if model.onlyMissingLocation {
+                    ContentUnavailableView("位置情報がない写真はありません", systemImage: "mappin.and.ellipse",
+                                           description: Text("表示対象のうち、位置情報が未設定の写真は見つかりませんでした。"))
+                } else {
+                    ContentUnavailableView("すべて非表示です", systemImage: "eye.slash",
+                                           description: Text("送信済み・重複の \(model.hiddenCount) 件を隠しています。"))
+                }
             } else if model.groupingMode == .sectioned {
                 sectionedScrollView
             } else {
@@ -93,6 +98,15 @@ private struct SectionBlockView: View {
     private var selectedCount: Int { model.selectedCount(in: section) }
     private var eligibleCount: Int { visibleItems.filter { $0.eligibility.isEligible }.count }
     private var recIds: Set<String> { model.recommendedIds(in: section) }
+    private var sectionTargets: [PhotoItem] {
+        section.items.filter { !model.hideDone || !model.isDone($0) }
+    }
+    private var missingLocationCount: Int {
+        sectionTargets.filter { $0.eligibility.isEligible && model.isMissingLocation($0) }.count
+    }
+    private var assignableLocationItems: [PhotoItem] {
+        sectionTargets.filter { $0.eligibility.isEligible && !model.hasOriginalLocation($0) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -151,6 +165,26 @@ private struct SectionBlockView: View {
             .buttonStyle(.plain)
 
             Spacer()
+
+            if section.representativeLocation != nil, missingLocationCount > 0 {
+                Button(section.isLocationBorrowed ? "推定位置を適用 (\(missingLocationCount))" : "枠の位置を適用 (\(missingLocationCount))") {
+                    model.applySectionLocation(in: section)
+                }
+                .controlSize(.small)
+                .disabled(model.isBusy)
+                .help("この枠の代表位置を、位置情報がない写真にのみ補完します（既存位置は上書きしません）")
+            }
+
+            if !assignableLocationItems.isEmpty {
+                Button {
+                    model.openLocationPicker(for: assignableLocationItems, preferredSectionId: section.id)
+                } label: {
+                    Label("位置を設定", systemImage: "mappin.and.ellipse")
+                }
+                .controlSize(.small)
+                .disabled(model.isBusy)
+                .help("この枠内の位置未設定写真に位置を補完します（既存位置は上書きしません）")
+            }
 
             Button {
                 model.selectRecommended(in: section)
@@ -267,8 +301,11 @@ private struct DisplayChunksView: View {
             duplicateNote: Self.duplicateNote(for: item, model: model),
             ranking: model.ranking(for: item.id, in: sectionId),
             standaloneIssues: model.standaloneIssues(for: item.id, in: sectionId),
+            locationOverride: model.locationOverride(for: item),
             thumbnails: model.thumbnails,
-            onToggle: { shift in model.toggle(item, shiftPressed: shift) }
+            onToggle: { shift in model.toggle(item, shiftPressed: shift) },
+            onEditLocation: { model.openLocationPicker(for: [item], preferredSectionId: sectionId) },
+            onClearLocation: { Task { await model.clearLocationOverrides(for: [item]) } }
         )
     }
 
@@ -338,8 +375,11 @@ private struct ClusterBoxView: View {
                         duplicateNote: DisplayChunksView.duplicateNote(for: item, model: model),
                         ranking: model.ranking(for: item.id, in: sectionId),
                         standaloneIssues: nil,
+                        locationOverride: model.locationOverride(for: item),
                         thumbnails: model.thumbnails,
-                        onToggle: { shift in model.toggle(item, shiftPressed: shift) }
+                        onToggle: { shift in model.toggle(item, shiftPressed: shift) },
+                        onEditLocation: { model.openLocationPicker(for: [item], preferredSectionId: sectionId) },
+                        onClearLocation: { Task { await model.clearLocationOverrides(for: [item]) } }
                     )
                 }
             }

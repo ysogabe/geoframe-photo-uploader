@@ -27,6 +27,8 @@ public struct AppPaths: Sendable {
     public var qualityCacheFile: URL { baseDir.appendingPathComponent("quality-cache.json") }
     /// 逆ジオコーディングの地名キャッシュ（JSON、0600）
     public var placeCacheFile: URL { baseDir.appendingPathComponent("place-cache.json") }
+    /// 欠落位置情報の補完値（JSON、0600）
+    public var locationOverridesFile: URL { baseDir.appendingPathComponent("location-overrides.json") }
 
     /// ベースディレクトリを 0700 で作成（既存なら権限を 0700 に揃える）。
     public func ensureBaseDir() throws {

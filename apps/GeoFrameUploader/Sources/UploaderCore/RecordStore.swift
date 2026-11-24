@@ -34,10 +34,14 @@ public struct UploadRecord: Codable, Sendable, Equatable {
     public var verified: Bool
     public var error: String?
     public var folderId: String
+    public var exifHasGPS: Bool?
+    public var uploadedLocation: PhotoLocation?
+    public var uploadedLocationSource: LocationSupplementSource?
 
     public init(runId: String, recordedAt: Date = Date(), item: PhotoItem, exported: ExportedOriginal?,
                 result: RecordResult, driveFileId: String? = nil, driveMd5Checksum: String? = nil,
-                verified: Bool = false, error: String? = nil, folderId: String, timeZone: TimeZone = .current) {
+                verified: Bool = false, error: String? = nil, folderId: String, timeZone: TimeZone = .current,
+                uploadedLocation: PhotoLocation? = nil, uploadedLocationSource: LocationSupplementSource? = nil) {
         self.runId = runId
         self.recordedAt = LocalTime.iso8601(recordedAt, timeZone: timeZone)
         self.localIdentifier = item.localIdentifier
@@ -63,6 +67,9 @@ public struct UploadRecord: Codable, Sendable, Equatable {
         self.verified = verified
         self.error = error.map(Redactor.redact)
         self.folderId = folderId
+        self.exifHasGPS = exported.map { $0.exifGPS != nil }
+        self.uploadedLocation = uploadedLocation
+        self.uploadedLocationSource = uploadedLocationSource
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -95,6 +102,9 @@ public struct UploadRecord: Codable, Sendable, Equatable {
         try c.encode(verified, forKey: .verified)
         try opt(error, .error)
         try c.encode(folderId, forKey: .folderId)
+        try opt(exifHasGPS, .exifHasGPS)
+        try opt(uploadedLocation, .uploadedLocation)
+        try opt(uploadedLocationSource, .uploadedLocationSource)
     }
 }
 

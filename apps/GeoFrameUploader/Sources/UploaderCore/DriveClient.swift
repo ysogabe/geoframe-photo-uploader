@@ -171,7 +171,8 @@ public final class DriveClient: @unchecked Sendable {
     /// 常に新規ファイルを作成する（既存ファイルの上書き・更新はしない）。
     /// `expectedMD5` を渡すと、完了レスポンスの md5Checksum と照合し不一致なら `.md5Mismatch` を投げる。
     public func uploadResumable(fileURL: URL, name: String, mimeType: String, folderId: String, byteCount: Int64,
-                                expectedMD5: String? = nil, progress: Progress? = nil) async throws -> DriveFile {
+                                expectedMD5: String? = nil, properties: [String: String]? = nil,
+                                progress: Progress? = nil) async throws -> DriveFile {
         let fh: FileHandle
         do { fh = try FileHandle(forReadingFrom: fileURL) } catch { throw DriveError.fileIO(error.localizedDescription) }
         defer { try? fh.close() }
@@ -180,7 +181,8 @@ public final class DriveClient: @unchecked Sendable {
         var file: DriveFile?
         while file == nil {
             try Task.checkCancellation()
-            let sessionURI = try await startSession(name: name, mimeType: mimeType, folderId: folderId, byteCount: byteCount)
+            let sessionURI = try await startSession(name: name, mimeType: mimeType, folderId: folderId,
+                                                    byteCount: byteCount, properties: properties)
             do {
                 file = try await runSession(sessionURI, fh: fh, total: byteCount, progress: progress)
             } catch SessionOutcome.gone {
@@ -198,7 +200,8 @@ public final class DriveClient: @unchecked Sendable {
 
     private enum SessionOutcome: Error { case gone }
 
-    private func startSession(name: String, mimeType: String, folderId: String, byteCount: Int64) async throws -> URL {
+    private func startSession(name: String, mimeType: String, folderId: String, byteCount: Int64,
+                              properties: [String: String]?) async throws -> URL {
         var c = URLComponents(url: Self.uploadURL, resolvingAgainstBaseURL: false)!
         c.percentEncodedQuery = FormEncoding.encode([("uploadType", "resumable"), ("fields", "id,name,md5Checksum,size")])
         var req = URLRequest(url: c.url!)
@@ -207,7 +210,10 @@ public final class DriveClient: @unchecked Sendable {
         req.setValue("application/json; charset=UTF-8", forHTTPHeaderField: "Content-Type")
         req.setValue(mimeType, forHTTPHeaderField: "X-Upload-Content-Type")
         req.setValue(String(byteCount), forHTTPHeaderField: "X-Upload-Content-Length")
-        let meta: [String: Any] = ["name": name, "parents": [folderId], "mimeType": mimeType]
+        var meta: [String: Any] = ["name": name, "parents": [folderId], "mimeType": mimeType]
+        if let properties, !properties.isEmpty {
+            meta["properties"] = properties
+        }
         req.httpBody = try JSONSerialization.data(withJSONObject: meta, options: [.sortedKeys])
         let (data, http) = try await sendWithRetry(req)
         guard http.statusCode == 200 else { throw Self.httpError(http.statusCode, data) }

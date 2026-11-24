@@ -16,6 +16,8 @@ public actor UploaderService {
         public var recordsFile: String
         public var itemCacheFile: String
         public var itemCacheEntryCount: Int
+        public var locationOverridesFile: String
+        public var locationOverrideCount: Int
         public var scopes: [String]
     }
 
@@ -27,6 +29,7 @@ public actor UploaderService {
     private var injectedCache: ResultCache?
     private var injectedQualityCache: QualityCache?
     private var injectedPlaceResolver: PlaceNameResolver?
+    private var injectedLocationOverrides: LocationOverrideStore?
     /// 自動重複確認で使い回す Drive フォルダ一覧（送信後・ログアウトで捨てる）
     private var listing: RemoteListingSnapshot? { didSet { if listing == nil { listingGeneration &+= 1 } } }
     private var listingGeneration = 0
@@ -103,6 +106,8 @@ public actor UploaderService {
                       signedIn: tokenStore.exists(), config: cfg, configError: cfgError,
                       appSupportDir: paths.baseDir.path, recordsFile: paths.recordsFile.path,
                       itemCacheFile: paths.itemCacheFile.path, itemCacheEntryCount: refreshedCacheCount(),
+                      locationOverridesFile: paths.locationOverridesFile.path,
+                      locationOverrideCount: refreshedLocationOverrideCount(),
                       scopes: GoogleAuth.scopes)
     }
 
@@ -182,7 +187,8 @@ public actor UploaderService {
         listing = nil
         defer { listing = nil }
         let coordinator = UploadCoordinator(drive: try driveClient(), exporter: exporter,
-                                            records: RecordStore(fileURL: paths.recordsFile), cache: resultCache(), log: log)
+                                            records: RecordStore(fileURL: paths.recordsFile), cache: resultCache(),
+                                            locationOverrides: locationOverrideStore(), log: log)
         return try await coordinator.run(items: items, folderId: folder, maxItemsPerRun: maxItemsPerRun, onEvent: onEvent)
     }
 
@@ -266,6 +272,48 @@ public actor UploaderService {
 
     public func cancelPlaceResolution() async {
         await injectedPlaceResolver?.cancelAll()
+    }
+
+    // MARK: 位置情報補完（location-overrides.json / PhotoKit 書き戻し）
+
+    private func refreshedLocationOverrideCount() -> Int {
+        let store = locationOverrideStore()
+        store.refresh()
+        return store.count
+    }
+
+    public func locationOverrideStore() -> LocationOverrideStore {
+        if let injectedLocationOverrides { return injectedLocationOverrides }
+        try? paths.ensureBaseDir()
+        let store = LocationOverrideStore(fileURL: paths.locationOverridesFile, log: log)
+        injectedLocationOverrides = store
+        return store
+    }
+
+    public func locationOverrides(for items: [PhotoItem]) -> [String: LocationOverrideEntry] {
+        let store = locationOverrideStore()
+        store.refresh()
+        return store.entries(for: items)
+    }
+
+    @discardableResult
+    public func saveLocationOverride(items: [PhotoItem], location: PhotoLocation, source: LocationSupplementSource,
+                                     placeName: String? = nil) -> Int {
+        locationOverrideStore().set(items: items, location: location, source: source, placeName: placeName)
+    }
+
+    public func removeLocationOverrides(localIdentifiers: [String]) {
+        locationOverrideStore().remove(localIdentifiers: localIdentifiers)
+    }
+
+    public func writeLocationToPhotosIfMissing(localIdentifiers: [String], location: PhotoLocation) async throws
+        -> PhotoLocationWriteSummary {
+        try await PhotoLibrary.shared.assignLocationIfMissing(localIdentifiers: localIdentifiers, location: location)
+    }
+
+    public func reloadItems(localIdentifiers: [String]) async throws -> [PhotoItem] {
+        try await PhotoLibrary.ensureAuthorized()
+        return PhotoLibrary.shared.fetchItems(localIdentifiers: localIdentifiers)
     }
 
     // MARK: 自動重複確認
