@@ -15,7 +15,8 @@ apps/GeoFrameUploader/
       PhotoItem.swift           写真メタデータの値型・ローカル日付範囲計算
       PhotoLibrary.swift        PhotoKit 認可状態取得・日付範囲フェッチ・サムネイル生成
       Eligibility.swift         メディア種別 / UTI 判定（純粋関数）と MIME マッピング
-      OriginalExporter.swift    PHAssetResource(.photo) の無加工書き出し + 1パス MD5/SHA-256 + EXIF 日時
+      OriginalExporter.swift    PHAssetResource(.photo) の無加工書き出し + 1パス MD5/SHA-256 + EXIF 日時/GPS
+      LocationSupplement.swift  欠落位置の補完ストア（location-overrides.json）・Drive properties 契約・座標パース
       OAuthPrimitives.swift     PKCE 生成・認可 URL 構築・コールバック検証・Keychain 保存
       LoopbackServer.swift      127.0.0.1 限定の一時 HTTP 受信（NWListener）
       GoogleAuth.swift          OAuth 2.0 認可・リフレッシュトークン管理・サインアウト
@@ -39,7 +40,7 @@ apps/GeoFrameUploader/
       AppModel.swift            @MainActor の画面状態・自動重複確認デバウンス・バックグラウンド解析世代管理・送信制御
       ThumbnailCache.swift      一覧/大型サムネイルのメモリキャッシュ
       CLI.swift                 --cli サブコマンド実装
-      Views/                    HeaderView / BannerView / DateFilterView / PhotoGridView / PhotoCell / SimilarCompareView / ActionBarView / SendPanelView / ContentView
+      Views/                    HeaderView / BannerView / DateFilterView / PhotoGridView / PhotoCell / SimilarCompareView / LocationPickerView / ActionBarView / SendPanelView / ContentView
   Tests/UploaderCoreTests/      URLProtocol スタブを用いた単体テスト群 & v0.2 選択・品質・地名解決テスト群
 ```
 
@@ -58,8 +59,13 @@ apps/GeoFrameUploader/
 ### 原本バイト列の抽出（`OriginalExporter`）
 - `PHAssetResource.assetResources(for: asset)` から **`.photo` リソースだけ** を取得します。編集済み写真であっても `.fullSizePhoto`（編集後レンダリング結果）は使わず、Live Photo であっても `.pairedVideo`（動画部分）は送りません。
 - `PHAssetResourceManager.default().requestData(for:options:dataReceivedHandler:completionHandler:)` でチャンクを受信しながら、一時ファイル（`0600`）への書き込みと `Insecure.MD5` / `SHA256` の更新を **1 パス** で同時に行います。
-- 書き出し完了後、`CGImageSourceCreateWithURL` を用いて再エンコードせずに EXIF の `DateTimeOriginal` と `OffsetTimeOriginal` だけを読み取ります。
+- 書き出し完了後、`CGImageSourceCreateWithURL` を用いて再エンコードせずに EXIF の `DateTimeOriginal`・`OffsetTimeOriginal` と GPS 座標だけを読み取ります。
 - アップロード（またはハッシュ確認）終了後、一時ファイルは即座に `remove()` されます。
+
+### 欠落位置情報の補完と Drive `properties` 連携（`LocationSupplement`）
+- 原本バイト列・MD5 無加工を維持するため、位置情報の補完は画像ファイル自体を書き換えずに行います（既存 EXIF GPS や `PHAsset.location` は一切上書きしません）。
+- 送信時は **原本 EXIF に有効な GPS が無い場合のみ**、`PHAsset.location`（`photos_asset`）→ `location-overrides.json`（`uploader_manual` / `uploader_borrowed`）の順で不足分を補い、Drive `files.create` メタデータの公開 `properties`（`geoframe.lat`, `geoframe.lon`, `geoframe.loc_source`）として送信します。
+- ユーザーが位置設定パネルで明示的にオプトインした場合のみ、`PHAssetChangeRequest.location` で `asset.location == nil` の写真へ位置を書き戻します。
 
 ## 3. Google OAuth 2.0 とセキュリティ境界
 

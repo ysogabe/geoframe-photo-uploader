@@ -120,11 +120,18 @@ struct CLI {
         let (from, to) = try dateArgs()
         report["from"] = from; report["to"] = to ?? from
         let items = try await service.loadItems(fromDay: from, toDay: to)
+        let overrides = await service.locationOverrides(for: items)
         CLI.log("found \(items.count) assets")
         report["itemCount"] = items.count
         report["eligibleCount"] = items.filter { $0.eligibility.isEligible }.count
 
-        var entries: [[String: Any]] = items.map { ["item": CLI.json($0)] }
+        var entries: [[String: Any]] = items.map { item in
+            var row: [String: Any] = ["item": CLI.json(item)]
+            if let ov = overrides[item.localIdentifier] {
+                row["locationOverride"] = CLI.json(ov)
+            }
+            return row
+        }
         guard has("--hash") else {
             report["items"] = entries
             return
@@ -183,6 +190,13 @@ struct CLI {
                         entries[i]["byteCount"] = e.byteCount
                         entries[i]["dataSource"] = e.dataSource.rawValue
                         entries[i]["exif"] = CLI.json(e.exif)
+                        entries[i]["exifHasGPS"] = (e.exifGPS != nil)
+                        if let gps = e.exifGPS { entries[i]["exifGPS"] = CLI.json(gps) }
+                        if let resolved = DriveLocationProperties.resolveForUpload(
+                            item: item, exifGPS: e.exifGPS, override: overrides[item.localIdentifier]
+                        ), let props = DriveLocationProperties.makeProperties(for: resolved) {
+                            entries[i]["locationPropertiesPreview"] = props
+                        }
                         entries[i]["md5Source"] = "export"
                     } catch {
                         entries[i]["hashError"] = Redactor.redact(error.localizedDescription)

@@ -57,6 +57,8 @@ public struct ItemResult: Codable, Sendable, Equatable {
     public var error: String?
     /// md5 / sha256 / byteCount を item-cache.json から取った（原本を書き出していない）
     public var md5FromCache: Bool = false
+    /// Drive properties に付与した補完位置の出所（付与した場合のみ）
+    public var locationSupplementSource: LocationSupplementSource? = nil
 
     /// 中止により処理が打ち切られたアイテム（status は `.failed` のまま）。
     public var wasCancelled: Bool { status == .failed && error == UploadCoordinator.cancelledMessage }
@@ -105,17 +107,19 @@ public final class UploadCoordinator: @unchecked Sendable {
     private let exporter: OriginalExporting
     private let records: RecordStore?
     private let cache: ResultCache?
+    private let locationOverrides: LocationOverrideStore?
     private let options: Options
     private let sleep: Sleeper
     private let log: @Sendable (String) -> Void
 
     public init(drive: DriveClient, exporter: OriginalExporting, records: RecordStore?, cache: ResultCache? = nil,
-                options: Options = Options(),
+                locationOverrides: LocationOverrideStore? = nil, options: Options = Options(),
                 sleeper: @escaping Sleeper = defaultSleeper, log: @escaping @Sendable (String) -> Void = { _ in }) {
         self.drive = drive
         self.exporter = exporter
         self.records = records
         self.cache = cache
+        self.locationOverrides = locationOverrides
         self.options = options
         self.sleep = sleeper
         self.log = log
@@ -128,8 +132,9 @@ public final class UploadCoordinator: @unchecked Sendable {
             throw UploadCoordinatorError.tooManyItems(selected: items.count, max: maxItemsPerRun)
         }
         let runId = UUID().uuidString
-        // 他のプロセスが追記した records.jsonl / item-cache.json を先に取り込む
+        // 他のプロセスが追記した records.jsonl / item-cache.json / location-overrides.json を先に取り込む
         cache?.refresh()
+        locationOverrides?.refresh()
         // 実行開始時点のフォルダ一覧（新鮮な md5 集合）
         var remote = RemoteIndex(files: try await drive.listFolderFiles(folderId: folderId))
         let remoteCount = remote.count
@@ -144,12 +149,14 @@ public final class UploadCoordinator: @unchecked Sendable {
                 onEvent?(UploadEvent(localIdentifier: item.localIdentifier, index: i, total: items.count, phase: phase,
                                      bytesSent: bytes?.0, bytesTotal: bytes?.1))
             }
-            let (result, exported) = await process(item: item, folderId: folderId, remote: &remote,
-                                                   inBatch: &inBatch, emit: emit)
+            let (result, exported, resolvedLoc) = await process(item: item, folderId: folderId, remote: &remote,
+                                                                inBatch: &inBatch, emit: emit)
             exported?.remove()
             var record = UploadRecord(runId: runId, item: item, exported: exported, result: result.status.record,
                                       driveFileId: result.driveFileId, driveMd5Checksum: result.driveMd5Checksum,
-                                      verified: result.verified, error: result.error, folderId: folderId)
+                                      verified: result.verified, error: result.error, folderId: folderId,
+                                      uploadedLocation: resolvedLoc?.location,
+                                      uploadedLocationSource: resolvedLoc?.source)
             if exported == nil && result.md5FromCache {
                 record.md5 = result.md5; record.sha256 = result.sha256; record.byteCount = result.byteCount
             }
@@ -204,13 +211,13 @@ public final class UploadCoordinator: @unchecked Sendable {
     }
 
     private func process(item: PhotoItem, folderId: String, remote: inout RemoteIndex,
-                         inBatch: inout [String: String], emit: @escaping @Sendable (UploadPhase, (Int64, Int64)?) -> Void) async -> (ItemResult, ExportedOriginal?) {
+                         inBatch: inout [String: String], emit: @escaping @Sendable (UploadPhase, (Int64, Int64)?) -> Void) async -> (ItemResult, ExportedOriginal?, ResolvedUploadLocation?) {
         var r = ItemResult(localIdentifier: item.localIdentifier, originalFilename: item.originalFilename, status: .failed,
                            verified: false)
         guard case .eligible = item.eligibility, let mime = item.mimeType else {
             r.status = .skippedIneligible
             r.error = item.eligibility.reason ?? "形式非対応"
-            return (r, nil)
+            return (r, nil, nil)
         }
 
         // キャッシュの MD5 が実行開始時点の Drive 一覧（または同一実行内の先行写真）にあれば、書き出さずに重複とする。
@@ -223,7 +230,7 @@ public final class UploadCoordinator: @unchecked Sendable {
                 r.md5 = cmd5; r.sha256 = cached.sha256; r.byteCount = cached.byteCount; r.md5FromCache = true
                 r.status = .skippedDuplicate
                 if let first { r.duplicateOfLocalIdentifier = first } else { r.duplicateOfFileId = hit?.id }
-                return (r, nil)
+                return (r, nil, nil)
             }
         }
 
@@ -231,7 +238,7 @@ public final class UploadCoordinator: @unchecked Sendable {
         let exp: ExportedOriginal
         do { exp = try await exporter.export(localIdentifier: item.localIdentifier) } catch {
             r.error = error is CancellationError ? Self.cancelledMessage : "原本の取得に失敗: \(error.localizedDescription)"
-            return (r, nil)
+            return (r, nil, nil)
         }
         r.md5 = exp.md5Hex; r.sha256 = exp.sha256Hex; r.byteCount = exp.byteCount; r.dataSource = exp.dataSource
 
@@ -240,21 +247,32 @@ public final class UploadCoordinator: @unchecked Sendable {
         if let first = inBatch[exp.md5Hex] {
             r.status = .skippedDuplicate
             r.duplicateOfLocalIdentifier = first
-            return (r, exp)
+            return (r, exp, nil)
         }
         if let f = remote.lookup(exp.md5Hex) {
             r.status = .skippedDuplicate
             r.duplicateOfFileId = f.id
-            return (r, exp)
+            return (r, exp, nil)
         }
-        if Task.isCancelled { r.error = Self.cancelledMessage; return (r, exp) }
+        if Task.isCancelled { r.error = Self.cancelledMessage; return (r, exp, nil) }
+
+        let overrideEntry = locationOverrides?.entry(for: item)
+        let resolvedLoc = DriveLocationProperties.resolveForUpload(
+            item: item,
+            exifGPS: exp.exifGPS,
+            override: overrideEntry
+        )
+        let driveProps = resolvedLoc.flatMap(DriveLocationProperties.makeProperties(for:))
+        if driveProps != nil {
+            r.locationSupplementSource = resolvedLoc?.source
+        }
 
         emit(.uploading(fraction: 0), (0, exp.byteCount))
         let uploaded: DriveFile
         do {
             uploaded = try await drive.uploadResumable(
                 fileURL: exp.fileURL, name: item.driveName, mimeType: mime, folderId: folderId,
-                byteCount: exp.byteCount, expectedMD5: exp.md5Hex,
+                byteCount: exp.byteCount, expectedMD5: exp.md5Hex, properties: driveProps,
                 progress: { sent, total in
                     emit(.uploading(fraction: total > 0 ? Double(sent) / Double(total) : 1), (sent, total))
                 })
@@ -264,14 +282,14 @@ public final class UploadCoordinator: @unchecked Sendable {
             r.driveMd5Checksum = actual
             r.error = "アップロード済みだが md5 不一致（fileId=\(id), ローカル \(expected), Drive \(actual ?? "なし")）。手動確認が必要です"
             inBatch[exp.md5Hex] = item.localIdentifier
-            return (r, exp)
+            return (r, exp, driveProps != nil ? resolvedLoc : nil)
         } catch {
             if error is CancellationError || (error as? URLError)?.code == .cancelled {
                 r.error = Self.cancelledMessage
             } else {
                 r.error = "アップロード失敗: \(Redactor.redact(error.localizedDescription))"
             }
-            return (r, exp)
+            return (r, exp, nil)
         }
         r.driveFileId = uploaded.id
         r.driveMd5Checksum = uploaded.md5Checksum
@@ -292,7 +310,7 @@ public final class UploadCoordinator: @unchecked Sendable {
             r.status = .failed
             r.error = "アップロード済みだが検証に失敗（fileId=\(uploaded.id)）: \(v.lastProblem)。再送せず手動確認してください"
         }
-        return (r, exp)
+        return (r, exp, driveProps != nil ? resolvedLoc : nil)
     }
 
     private struct VerifyOutcome: Sendable {

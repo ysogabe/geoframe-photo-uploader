@@ -16,8 +16,11 @@ struct PhotoCell: View {
     let duplicateNote: String?
     let ranking: RankedMember?
     let standaloneIssues: [String]?
+    let locationOverride: LocationOverrideEntry?
     let thumbnails: ThumbnailCache
     let onToggle: (_ shiftPressed: Bool) -> Void
+    let onEditLocation: (() -> Void)?
+    let onClearLocation: (() -> Void)?
 
     @State private var image: NSImage?
 
@@ -92,6 +95,27 @@ struct PhotoCell: View {
         .opacity(eligible ? 1 : 0.45)
         .contentShape(Rectangle())
         .onTapGesture { if isSelectable { triggerToggle() } }
+        .contextMenu {
+            if eligible {
+                if let loc = item.location, PhotoSectioner.isValidCoordinate(loc) {
+                    Button("既存の位置情報あり（上書きしません）") {}
+                        .disabled(true)
+                } else {
+                    if let onEditLocation {
+                        Button(locationOverride == nil ? "位置情報を補完…" : "補完した位置を変更…") {
+                            onEditLocation()
+                        }
+                        .disabled(!isSelectable)
+                    }
+                    if locationOverride != nil, let onClearLocation {
+                        Button("補完した位置をクリア") {
+                            onClearLocation()
+                        }
+                        .disabled(!isSelectable)
+                    }
+                }
+            }
+        }
         .task(id: item.id) {
             if let hit = thumbnails.cached(item.id) { image = hit; return }
             let img = await thumbnails.image(for: item.id)
@@ -189,10 +213,20 @@ struct PhotoCell: View {
             if item.isLivePhoto {
                 Image(systemName: "livephoto").help("Live Photo（静止画のみ送信）")
             }
-            if let loc = item.location {
+            if let loc = item.location, PhotoSectioner.isValidCoordinate(loc) {
                 Image(systemName: "mappin.and.ellipse")
                     .foregroundStyle(.red)
                     .help(String(format: "位置情報あり（%.5f, %.5f）", loc.lat, loc.lon))
+            } else if let ov = locationOverride {
+                let place = ov.placeName.map { "\($0) / " } ?? ""
+                let coordText = String(format: "%.5f, %.5f", ov.lat, ov.lon)
+                Image(systemName: "mappin.circle.fill")
+                    .foregroundStyle(.blue)
+                    .help("位置を補完済み（\(place)\(coordText) / \(ov.source.displayLabel)）")
+            } else if eligible {
+                Image(systemName: "mappin.slash")
+                    .foregroundStyle(.orange)
+                    .help("位置情報なし（GEOFRAME で未表示になる可能性があります）")
             }
         }
         .font(.caption2)

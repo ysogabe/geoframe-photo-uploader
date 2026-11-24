@@ -30,6 +30,7 @@ apps/GeoFrameUploader/
     RecordStore.swift           records.jsonl（0600）
     ResultCache.swift           item-cache.json（写真ごとの MD5 と前回の結果、0600）
     PhotoSectioner.swift        撮影時刻ギャップ + Haversine 距離による場所・時間枠分割
+    LocationSupplement.swift    欠落位置情報の補完ストア（location-overrides.json, 0600）と Drive properties 生成
     PlaceNameResolver.swift     CLGeocoder 直列キュー + place-cache.json（0600）
     ImageQuality.swift          512px サムネイル解析（pHash / 画質指標）+ quality-cache.json（0600）
     SimilarityGrouper.swift     セクション内類似クラスタリング・品質順位・推奨自動選択・Shift 範囲計算
@@ -106,6 +107,7 @@ scripts/build-app.sh       # .build/GeoFrameUploader.app を作って署名
 | `item-cache.json` | 写真ごとの原本 MD5 / SHA-256 / バイト数・撮影日時（`creationDate`）・前回の結果（`sent` / `duplicateRemote` / `checkedNotOnDrive` / `failed`、Drive fileId、フォルダ ID、日時）。一覧の初期バッジと2ヶ月見開きカレンダーの履歴表示に使用。キーは `localIdentifier`（0600、アトミック書き込み） |
 | `quality-cache.json` | 512 px サムネイルから計算した pHash と品質指標（鮮明度・露出・コントラスト等）のキャッシュ。`localIdentifier` をキーに、`originalFilename`・`uti`・解像度・更新タイムスタンプ・アルゴリズム版で無効化（format v2、0600） |
 | `place-cache.json` | 小数第 3 位（約 100 m 精度）に丸めた座標キー `ja:lat,lon` ごとの逆ジオコーディング地名キャッシュ（0600） |
+| `location-overrides.json` | 位置情報がない写真に対して Uploader で補完した座標（`localIdentifier` キー、0600）。既存の位置情報は上書きしない |
 
 ### item-cache.json（結果キャッシュ）
 

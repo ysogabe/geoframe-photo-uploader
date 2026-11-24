@@ -23,7 +23,8 @@ GeoFrame Uploader は [GEOFRAME](https://ysogabe.github.io/geoframe/)（Google �
 - **選択時の自動重複確認と手動確認**: 原本の MD5 を Google ドライブのフォルダ内の `md5Checksum` と照合し、既にある写真や選択内で重複する写真を自動でスキップ（または選択解除）します。キャッシュに MD5 があれば iCloud からの再取得を省略します。
 - **上書きしない安全な再開可能アップロード**: 8 MiB チャンクの再開可能アップロードで常に新規ファイルとして作成します（既存ファイルの上書き・改名・削除はしません）。送信後は API 応答と再取得した `files.list` の両方で `md5Checksum` の一致を検証します。
 - **送信中の状態がひと目でわかるパネル**: 送信ボタンを押すと大きなサムネイル・処理段階・MB 進捗・残り枚数・累計件数・次に送る写真を確認でき、`Esc` でいつでも中止できます。
-- **前回の結果を記憶 & ローカルキャッシュ**: 送信結果・MD5 / SHA-256 を `records.jsonl` と `item-cache.json`、品質スコア・pHash を `quality-cache.json`、逆ジオコーディング地名を `place-cache.json`（いずれも権限 `0600`）に保存し、次回読み込み時から高速に再表示します。
+- **前回の結果を記憶 & ローカルキャッシュ**: 送信結果・MD5 / SHA-256 を `records.jsonl` と `item-cache.json`、品質スコア・pHash を `quality-cache.json`、逆ジオコーディング地名を `place-cache.json`、位置補完データを `location-overrides.json`（いずれも権限 `0600`）に保存し、次回読み込み時から高速に再表示します。
+- **位置情報がない写真への補完（既存位置の上書きなし）**: 原本 EXIF や写真アプリの位置情報が無い写真に対し、同日・近接セクションの推定位置、地名検索、地図クリック、座標入力から位置を補完できます。送信時は原本バイト列を変えずに Drive カスタム `properties`（`geoframe.lat` / `geoframe.lon`）として付与し、Apple Photos 側への書き戻し（オプション）も選べます。
 - **CLI でも使える**: `.app` バンドル経由で `status` / `scan` / `auth` / `upload` / `signout` を実行できます。
 
 ## 画面のイメージ

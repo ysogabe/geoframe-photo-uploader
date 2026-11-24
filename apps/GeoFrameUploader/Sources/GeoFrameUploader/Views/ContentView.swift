@@ -46,6 +46,10 @@ struct ContentView: View {
         } message: { items in
             Text("選択が \(AppModel.confirmThreshold) 件を超えています。\(items.count) 件の原本をそのまま Google ドライブ「\(model.status?.config.folderName ?? "GeoFrame")」へ順に送信します。")
         }
+        .sheet(item: $model.locationPickerRequest) { req in
+            LocationPickerView(request: req)
+                .environmentObject(model)
+        }
     }
 
     private var mainContent: some View {
@@ -64,5 +68,14 @@ struct ContentView: View {
             ActionBarView()
         }
         .animation(.easeInOut(duration: 0.2), value: model.banner)
+        .alert("位置情報がない写真が \(model.pendingMissingLocationItems.count) 件含まれています",
+               isPresented: $model.showMissingLocationSendConfirm,
+               presenting: model.pendingSend) { items in
+            Button("位置を設定する…") { model.openLocationPickerFromSendWarning() }
+            Button("このまま \(items.count) 件を送信") { model.confirmPendingSend(items) }
+            Button("キャンセル", role: .cancel) { model.cancelPendingSend() }
+        } message: { items in
+            Text("選択中の \(items.count) 件のうち \(model.pendingMissingLocationItems.count) 件に位置情報がありません。GEOFRAME では位置情報がない写真は表示されないため、必要であれば送信前に位置を補完できます。")
+        }
     }
 }

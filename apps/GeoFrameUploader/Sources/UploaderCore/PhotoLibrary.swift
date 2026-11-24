@@ -1,4 +1,5 @@
 import AppKit
+import CoreLocation
 import Foundation
 import Photos
 
@@ -23,6 +24,7 @@ public enum PhotoLibraryError: Error, LocalizedError, Equatable {
     case authorizationTimeout
     case assetNotFound(String)
     case noPhotoResource(String)
+    case invalidLocation
 
     public var errorDescription: String? {
         switch self {
@@ -31,11 +33,27 @@ public enum PhotoLibraryError: Error, LocalizedError, Equatable {
         case .authorizationTimeout: return "写真ライブラリのアクセス許可ダイアログに応答がありませんでした。"
         case .assetNotFound(let id): return "写真が見つかりません: \(id)"
         case .noPhotoResource(let id): return "原本（.photo）リソースがありません: \(id)"
+        case .invalidLocation: return "位置情報の座標が不正です"
         }
     }
 }
 
-/// PhotoKit ラッパー。読み取り専用。
+public struct PhotoLocationWriteSummary: Sendable, Equatable {
+    public var updatedIds: [String]
+    public var skippedAlreadyHasLocationIds: [String]
+    public var skippedNotEditableIds: [String]
+    public var missingAssetIds: [String]
+
+    public init(updatedIds: [String] = [], skippedAlreadyHasLocationIds: [String] = [],
+                skippedNotEditableIds: [String] = [], missingAssetIds: [String] = []) {
+        self.updatedIds = updatedIds
+        self.skippedAlreadyHasLocationIds = skippedAlreadyHasLocationIds
+        self.skippedNotEditableIds = skippedNotEditableIds
+        self.missingAssetIds = missingAssetIds
+    }
+}
+
+/// PhotoKit ラッパー。位置情報未設定アセットへの明示的補完書き込みのみオプション対応（画像変更・削除・既存位置上書きなし）。
 public final class PhotoLibrary: @unchecked Sendable {
     public static let shared = PhotoLibrary()
 
@@ -213,6 +231,112 @@ public final class PhotoLibrary: @unchecked Sendable {
             }
         }
         return out
+    }
+
+    public func fetchItems(localIdentifiers: [String]) -> [PhotoItem] {
+        guard !localIdentifiers.isEmpty else { return [] }
+        let opts = PHFetchOptions()
+        opts.includeHiddenAssets = false
+        opts.includeAllBurstAssets = true
+        let result = PHAsset.fetchAssets(withLocalIdentifiers: localIdentifiers, options: opts)
+        var byId: [String: PhotoItem] = [:]
+        result.enumerateObjects { asset, _, _ in
+            byId[asset.localIdentifier] = Self.makeItem(asset)
+        }
+        var seen = Set<String>()
+        return localIdentifiers.filter { seen.insert($0).inserted }.compactMap { byId[$0] }
+    }
+
+    /// `asset.location == nil` の写真に対してのみ位置情報を書き込む（既存の位置情報は絶対に上書きしない）。
+    public func assignLocationIfMissing(localIdentifiers: [String], location: PhotoLocation) async throws -> PhotoLocationWriteSummary {
+        guard PhotoSectioner.isValidCoordinate(location) else { throw PhotoLibraryError.invalidLocation }
+        try await Self.ensureAuthorized()
+        var seen = Set<String>()
+        let uniqueIds = localIdentifiers.filter { seen.insert($0).inserted }
+        guard !uniqueIds.isEmpty else { return PhotoLocationWriteSummary() }
+
+        let opts = PHFetchOptions()
+        opts.includeHiddenAssets = false
+        opts.includeAllBurstAssets = true
+        let fetched = PHAsset.fetchAssets(withLocalIdentifiers: uniqueIds, options: opts)
+        var byId: [String: PHAsset] = [:]
+        fetched.enumerateObjects { asset, _, _ in
+            byId[asset.localIdentifier] = asset
+        }
+
+        var missingIds: [String] = []
+        var alreadyHasLocIds: [String] = []
+        var notEditableIds: [String] = []
+        var candidates: [PHAsset] = []
+
+        for id in uniqueIds {
+            guard let asset = byId[id] else {
+                missingIds.append(id)
+                continue
+            }
+            if asset.location != nil {
+                alreadyHasLocIds.append(id)
+                continue
+            }
+            if !asset.canPerform(.properties) {
+                notEditableIds.append(id)
+                continue
+            }
+            candidates.append(asset)
+        }
+
+        guard !candidates.isEmpty else {
+            return PhotoLocationWriteSummary(
+                updatedIds: [],
+                skippedAlreadyHasLocationIds: alreadyHasLocIds,
+                skippedNotEditableIds: notEditableIds,
+                missingAssetIds: missingIds
+            )
+        }
+
+        let targetLoc = CLLocation(latitude: location.lat, longitude: location.lon)
+        let box = WriteTrackingBox()
+        let assetsToWrite = candidates
+        try await PHPhotoLibrary.shared().performChanges {
+            var written: [String] = []
+            var skippedInBlock: [String] = []
+            for asset in assetsToWrite {
+                // performChanges 内でも直前に location 未設定を再検証し、既存位置を上書きしない
+                guard asset.location == nil else {
+                    skippedInBlock.append(asset.localIdentifier)
+                    continue
+                }
+                let req = PHAssetChangeRequest(for: asset)
+                req.location = targetLoc
+                written.append(asset.localIdentifier)
+            }
+            box.record(written: written, skipped: skippedInBlock)
+        }
+
+        let (writtenIds, skippedInBlock) = box.snapshot()
+        return PhotoLocationWriteSummary(
+            updatedIds: writtenIds,
+            skippedAlreadyHasLocationIds: alreadyHasLocIds + skippedInBlock,
+            skippedNotEditableIds: notEditableIds,
+            missingAssetIds: missingIds
+        )
+    }
+}
+
+private final class WriteTrackingBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var written: [String] = []
+    private var skipped: [String] = []
+
+    func record(written: [String], skipped: [String]) {
+        lock.withLock {
+            self.written = written
+            self.skipped = skipped
+        }
+    }
+
+    func snapshot() -> ([String], [String]) {
+        lock.withLock { (written, skipped) }
     }
 }
 
