@@ -32,7 +32,7 @@
       <a href="#faq">FAQ</a>
       <a href="#docs">ドキュメント</a>
     </nav>
-    <span class="stage-label"><span aria-hidden="true"></span>v0.2（ソースからビルド）</span>
+    <span class="stage-label"><span aria-hidden="true"></span>位置補完対応（ソースからビルド）</span>
   </header>
 
   <main id="top">
@@ -77,6 +77,13 @@
             <p>8 MiB チャンクの再開可能アップロードで常に新規作成。改名・削除なし</p>
           </div>
         </div>
+        <div class="note-item">
+          <span class="note-index">04</span>
+          <div>
+            <strong>原本を変えずに位置補完</strong>
+            <p>GPS が無い写真だけ別ファイルに保存し、送信時だけ Drive カスタム属性として付与</p>
+          </div>
+        </div>
         <p class="note-disclaimer">下の画面画像は実際の SwiftUI 画面構成をもとにしたサンプルデータ見本です。</p>
       </aside>
     </section>
@@ -106,6 +113,7 @@
         <button type="button" role="tab" aria-selected="false" data-tab="main"><span>03</span>一覧と自動重複確認</button>
         <button type="button" role="tab" aria-selected="false" data-tab="sending"><span>04</span>送信モーダルパネル</button>
         <button type="button" role="tab" aria-selected="false" data-tab="overview"><span>05</span>全体ワークフロー図</button>
+        <button type="button" role="tab" aria-selected="false" data-tab="location"><span>06</span>位置補完の仕組み</button>
       </div>
 
       <div class="monitor-shell">
@@ -146,6 +154,14 @@
           <figcaption>
             <span><strong>全体構成と処理フロー</strong> Apple Photos からの抽出、重複判定と再開可能アップロード、Google ドライブでの検証とローカル記録までの流れ。</span>
             <span>構成図</span>
+          </figcaption>
+        </figure>
+
+        <figure class="shot tab-pane" data-pane="location" hidden>
+          <img src="images/location-supplement-flow.png" width="1040" height="620" alt="原本バイト列と MD5 を変えず、別ファイル保存と送信時の Drive カスタム属性で位置を補う仕組み図">
+          <figcaption>
+            <span><strong>位置補完の仕組み（非破壊連携）</strong> 既存の位置は上書きせず、位置が無い写真だけ <code>location-overrides.json</code> に保存し、送信時だけ <code>properties</code> を付けて GEOFRAME 側で補います。</span>
+            <span>連携図</span>
           </figcaption>
         </figure>
       </div>
@@ -211,6 +227,16 @@
           <h3>アプリと CLI で同じコアを共有</h3>
           <p><code>UploaderCore</code> を共通化し、<code>scripts/cli.sh</code> から <code>status</code> / <code>scan</code> / <code>auth</code> / <code>upload</code> / <code>signout</code> を実行できます。GUI と CLI が同じ <code>records.jsonl</code> / <code>item-cache.json</code> を共有します。</p>
         </article>
+        <article class="feature">
+          <span class="micro-label">LOCATION SUPPLEMENT</span>
+          <h3>原本を変えずに、足りない位置だけを補う</h3>
+          <p>同日・近接セクション候補、地名検索（<code>MKLocalSearch</code>）、地図クリック、緯度経度・<code>@lat,lon</code> URL から位置を指定し、<code>location-overrides.json</code>（<code>0600</code>）に別保存。原本バイト列と MD5 は一切変わりません。</p>
+        </article>
+        <article class="feature">
+          <span class="micro-label">NON-OVERWRITE &amp; FALLBACK</span>
+          <h3>既存位置は上書きせず、カタログ側で補う</h3>
+          <p>原本 EXIF や写真アプリに有効な位置がある写真は対象外。位置が無い写真に限り送信時の Drive 公開 <code>properties</code>（<code>geoframe.lat</code> / <code>geoframe.lon</code>）を付け、GEOFRAME 側も EXIF 欠損時のみ読み取ります。</p>
+        </article>
       </div>
     </section>
 
@@ -233,7 +259,7 @@
           <li class="core">
             <span class="micro-label">02 / UPLOADER</span>
             <strong>GeoFrame Uploader</strong>
-            <p>重複スキップ・再開可能アップロード・二重 MD5 検証。<code>records.jsonl</code> に履歴を保存。</p>
+            <p>重複スキップ・再開可能アップロード・二重 MD5 検証・必要時のみ <code>properties</code> 付与。<code>records.jsonl</code> に履歴を保存。</p>
           </li>
           <li>
             <span class="micro-label">03 / STORAGE</span>
@@ -243,7 +269,7 @@
           <li>
             <span class="micro-label">04 / CATALOG &amp; VIEW</span>
             <strong><a href="https://ysogabe.github.io/geoframe/">GEOFRAME</a> &amp; <a href="https://ysogabe.github.io/miharashi/">Miharashi</a></strong>
-            <p>GEOFRAME が定期的に取り込み、Miharashi がキオスク画面へ美しく映します。</p>
+            <p>GEOFRAME が写真と <code>properties</code> を定期的に取り込み、Miharashi がキオスク画面へ美しく映します。</p>
           </li>
         </ol>
       </div>
@@ -280,6 +306,10 @@
           <details>
             <summary>rclone ではなくネイティブ OAuth + Drive API を採用した理由は？</summary>
             <p><code>rclone</code> の共有クライアント ID は廃止予定（<a href="https://rclone.org/drive/#making-your-own-client-id">rclone 公式ドキュメント</a>）で、その対応に加え、<code>rclone copyto</code> による同名別内容ファイルの上書きリスクを避け、再開可能アップロード後の MD5 照合までアプリ内で完結させるためです。詳しくは <a href="https://github.com/ysogabe/geoframe-photo-uploader/blob/main/docs/drive-connection-decision.md">Google ドライブ接続方式の評価と決定</a> に記録しています。</p>
+          </details>
+          <details>
+            <summary>位置情報を補完すると、元の写真や既存の位置情報は書き換わりますか？</summary>
+            <p>書き換わりません。原本バイト列と MD5 を保つため、補完座標は <code>location-overrides.json</code> に別保存し、送信時だけ Drive 公開 <code>properties</code>（<code>geoframe.lat</code> / <code>geoframe.lon</code>）として付与します。原本 EXIF や <code>PHAsset.location</code> に有効な位置がある写真は対象から外し、写真アプリへの書き戻し（既定オフ）も位置未設定の写真だけに適用します。</p>
           </details>
           <details>
             <summary>ローカルキャッシュ（item-cache.json）を消しても重複送信しませんか？</summary>
